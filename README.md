@@ -1,6 +1,6 @@
 # ECOM
 
-Plataforma personal de dropshipping automatizado. Este repositorio comienza en modo seguro para desarrollo y depuración.
+Plataforma personal de dropshipping automatizado. Repositorio en modo seguro para desarrollo y depuración.
 
 ## Modos de ejecución
 
@@ -8,52 +8,72 @@ Plataforma personal de dropshipping automatizado. Este repositorio comienza en m
 - `SANDBOX`: integraciones de prueba aprobadas.
 - `REAL`: requiere credenciales y validaciones completas; nunca se activa por defecto.
 
+## Bloque 2 (actual)
+
+Incluye:
+
+- Motor de reglas (`@ecom/rules`): margen ideal 40%, mínimo 35%, alerta 30–34.99%, pausa <30% o stock = 0, máx. 2 cambios de precio/día, ±10% por cambio.
+- API NestJS: health, rules, products MOCK, approvals, audit, auth MOCK.
+- Panel Next.js: listado de candidatos, re-evaluación, solicitudes de aprobación, decisiones y auditoría.
+- Esquema Prisma ampliado: roles, passwordHash, price history, confidence, isFirstPublication.
+- Pruebas unitarias del motor de reglas.
+
+**Ninguna** integración real (Shopify, CJ, Gemini, pagos) está activa.
+
 ## Desarrollo en macOS High Sierra
 
-El entorno usa Node 22 y pnpm **dentro de Docker**. No se requiere una instalación local de Node, Corepack o pnpm.
+Node 22 y pnpm **dentro de Docker**. No se requiere Node local.
 
-### Primer arranque
+### Primer arranque / actualizar tras pull
 
 ```bash
-cp .env.example .env
+cd /ruta/a/ecom
+git pull
+cp .env.example .env   # solo si aún no existe
+docker compose down
 docker compose up -d --build
 docker compose run --rm workspace pnpm install
 docker compose run --rm workspace pnpm --filter @ecom/database generate
-docker compose run --rm workspace pnpm --filter @ecom/database migrate --name init
+docker compose run --rm workspace pnpm --filter @ecom/database migrate --name block2
 docker compose --profile app up -d
+```
+
+### Probar reglas
+
+```bash
+docker compose run --rm workspace pnpm --filter @ecom/rules test
 ```
 
 Servicios:
 
-- Panel: `http://localhost:3000`
-- API: `http://localhost:4000/health`
-- PostgreSQL: `localhost:5432`
-- Redis: `localhost:6379`
+- Panel: http://localhost:3000
+- API health: http://localhost:4000/health
+- Productos MOCK: http://localhost:4000/products
+- Reglas: http://localhost:4000/rules
+- PostgreSQL: localhost:5432
+- Redis: localhost:6379
 
-### Comandos de desarrollo
+### Comandos útiles
 
 ```bash
-# Ver estado y logs
 docker compose ps
 docker compose logs -f api
 docker compose logs -f web
-
-# Pruebas, lint y Prisma (siempre dentro de Docker)
 docker compose run --rm workspace pnpm test
-docker compose run --rm workspace pnpm lint
-docker compose run --rm workspace pnpm --filter @ecom/database migrate --name nombre_migracion
-
-# Detener servicios sin borrar datos locales
 docker compose --profile app down
 ```
 
 ## Principios de seguridad
 
-- Nunca subir `.env`, tokens, claves, URLs de producción ni secretos.
-- `MOCK`, `SANDBOX` y `REAL` deben mostrarse explícitamente en interfaz y auditoría.
+- Nunca subir `.env`, tokens, claves ni secretos.
+- `MOCK` / `SANDBOX` / `REAL` visibles en UI y auditoría.
 - Shopify gestiona pagos, reembolsos y métodos de pago; ECOM no procesa dinero.
-- Las operaciones críticas requieren aprobación y registro de auditoría.
+- Acciones críticas (primera publicación, nuevo proveedor, eliminación, etc.) requieren aprobación humana.
 
-## Estado inicial
+## Próximos bloques
 
-La base contiene infraestructura local, un esquema de datos base y servicios mínimos. Los conectores reales de Shopify, CJdropshipping, IA, almacenamiento, correo y Telegram se habilitarán después, con variables vacías por defecto.
+- Persistencia real con Prisma en API (sustituir store en memoria).
+- Auth email/password + sesión + RBAC completo.
+- Conectores SANDBOX de Shopify y CJdropshipping.
+- AI Router (Gemini + fallbacks) sin cobros automáticos.
+- Marketing orgánico y landing pages.
