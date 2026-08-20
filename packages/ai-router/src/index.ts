@@ -74,11 +74,13 @@ function geminiKey() {
 function hfToken() {
   return env('HF_TOKEN') || env('HUGGINGFACE_API_KEY');
 }
+/** Default matches current Gemini stable Flash (2026). Override with GEMINI_MODEL. */
 function geminiModel() {
-  return env('GEMINI_MODEL', 'gemini-2.0-flash') || 'gemini-2.0-flash';
+  return env('GEMINI_MODEL', 'gemini-3.6-flash') || 'gemini-3.6-flash';
 }
+/** Prefer a small free-tier friendly model; override with HF_MODEL. */
 function hfModel() {
-  return env('HF_MODEL', 'mistralai/Mistral-7B-Instruct-v0.3') || 'mistralai/Mistral-7B-Instruct-v0.3';
+  return env('HF_MODEL', 'HuggingFaceH4/zephyr-7b-beta') || 'HuggingFaceH4/zephyr-7b-beta';
 }
 
 function hasKey(k: string) {
@@ -295,87 +297,78 @@ async function callHuggingFace(req: AiRequest): Promise<AiResponse> {
     };
   }
 
-  const prompt = req.messages.map((m) => `${m.role}: ${m.content}`).join('\n');
+  // Modern HF: OpenAI-compatible chat via router (Inference Providers)
+  const chatMessages = req.messages.map((m) => ({
+    role: m.role === 'assistant' ? 'assistant' : m.role === 'system' ? 'system' : 'user',
+    content: m.content,
+  }));
 
-  // Primary: classic Inference API; secondary path tried only if first fails hard
-  const endpoints = [
-    `https://api-inference.huggingface.co/models/${model}`,
-    `https://router.huggingface.co/hf-inference/models/${model}`,
-  ];
+  try {
+    const res = await fetch('https://router.huggingface.co/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model,
+        messages: chatMessages,
+        max_tokens: req.maxTokens ?? 512,
+        temperature: req.temperature ?? 0.4,
+      }),
+    });
 
-  let lastError = 'HF sin respuesta';
+    const data = (await res.json()) as any;
 
-  for (const endpoint of endpoints) {
-    try {
-      const res = await fetch(endpoint, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          inputs: prompt,
-          parameters: {
-            max_new_tokens: req.maxTokens ?? 512,
-            temperature: req.temperature ?? 0.4,
-            return_full_text: false,
-          },
-        }),
-      });
-
-      const data = (await res.json()) as any;
-
-      if (!res.ok) {
-        const msg = data?.error || `HuggingFace HTTP ${res.status}`;
-        lastError = String(msg);
-        continue;
-      }
-
-      let text = '';
-      if (Array.isArray(data)) {
-        text = data[0]?.generated_text ?? data[0]?.summary_text ?? '';
-      } else if (typeof data?.generated_text === 'string') {
-        text = data.generated_text;
-      } else if (typeof data === 'string') {
-        text = data;
-      } else {
-        text = JSON.stringify(data).slice(0, 2000);
-      }
-
-      if (text) {
-        return {
-          ok: true,
-          text,
-          provider: 'huggingface',
-          model,
-          mode,
-          mock: false,
-          latencyMs: Date.now() - started,
-        };
-      }
-      lastError = 'Respuesta HF vacía';
-    } catch (e: any) {
-      lastError = e?.message || 'Error de red Hugging Face';
+    if (!res.ok) {
+      const msg = data?.error?.message || data?.error || `HuggingFace HTTP ${res.status}`;
+      return {
+        ok: false,
+        text: '',
+        provider: 'huggingface',
+        model,
+        mode,
+        mock: false,
+        pending: true,
+        error: String(msg),
+        latencyMs: Date.now() - started,
+      };
     }
-  }
 
-  return {
-    ok: false,
-    text: '',
-    provider: 'huggingface',
-    model,
-    mode,
-    mock: false,
-    pending: true,
-    error: lastError,
-    latencyMs: Date.now() - started,
-  };
+    const text = data?.choices?.[0]?.message?.content ?? '';
+
+    return {
+      ok: Boolean(text),
+      text: text || '',
+      provider: 'huggingface',
+      model,
+      mode,
+      mock: false,
+      error: text ? undefined : 'Respuesta HF vacía',
+      usage: {
+        promptTokens: data?.usage?.prompt_tokens,
+        completionTokens: data?.usage?.completion_tokens,
+      },
+      latencyMs: Date.now() - started,
+    };
+  } catch (e: any) {
+    return {
+      ok: false,
+      text: '',
+      provider: 'huggingface',
+      model,
+      mode,
+      mock: false,
+      pending: true,
+      error: e?.message || 'Error de red Hugging Face',
+      latencyMs: Date.now() - started,
+    };
+  }
 }
 
 export async function complete(req: AiRequest): Promise<AiResponse> {
   const status = getRouterStatus();
   const prefer = req.prefer && req.prefer.length > 0 ? req.prefer : status.defaultChain;
-  // Never treat mock as a live attempt in the middle of the chain
   const chain = prefer.filter((id) => id !== 'mock');
 
   const useLive = status.mode !== 'MOCK' || status.forceLive;
