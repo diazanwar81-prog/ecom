@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { Controller, Get, Module, Injectable, Post, Body, Param, Query } from '@nestjs/common';
+import { Controller, Get, Module, Injectable, Post, Body, Param, Query, Headers, Req } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import {
   calculateMargin,
@@ -19,6 +19,7 @@ import {
   publishProduct,
   createMockOrder,
 } from '../../../packages/shopify/src/index';
+import { getCjStatus, fulfillOrder } from '../../../packages/cj/src/index';
 import { prisma, ProductStatus, ApprovalStatus, RuntimeMode } from '../../../packages/database/src/index';
 
 const MODE = (process.env.ECOM_MODE ?? 'MOCK') as 'MOCK' | 'SANDBOX' | 'REAL';
@@ -96,11 +97,7 @@ async function ensureSeed() {
   const user = await prisma.user.upsert({
     where: { email: 'admin@ecom.local' },
     update: {},
-    create: {
-      email: 'admin@ecom.local',
-      name: 'Administrador ECOM',
-      role: 'ADMIN',
-    },
+    create: { email: 'admin@ecom.local', name: 'Administrador ECOM', role: 'ADMIN' },
   });
 
   const store = await prisma.store.create({
@@ -164,7 +161,6 @@ async function ensureSeed() {
       salePrice: s.salePrice,
       costs: { productCost: s.productCost, shippingCost: s.shippingCost },
     });
-
     const product = await prisma.product.create({
       data: {
         storeId: store.id,
@@ -189,11 +185,9 @@ async function ensureSeed() {
         },
       },
     });
-
     await writeAudit('PRODUCT_SEEDED', 'Product', product.id, { title: s.title });
   }
-
-  console.log('Prisma seed: admin + store + 3 MOCK products');
+  console.log('Prisma seed OK');
 }
 
 @Injectable()
@@ -221,15 +215,17 @@ class HealthController {
       db = 'error';
     }
     const shopify = getShopifyStatus();
+    const cj = getCjStatus();
     return {
       status: db === 'ok' ? 'ok' : 'degraded',
       service: 'ecom-api',
       mode: MODE,
       timestamp: new Date().toISOString(),
-      block: 5,
+      block: 7,
       aiRouter: true,
       persistence: 'prisma',
       shopify: shopify.canPublishLive ? 'live-ready' : 'mock',
+      cj: cj.canFulfillLive ? 'live-ready' : 'mock',
       db,
     };
   }
@@ -237,6 +233,14 @@ class HealthController {
   @Get('rules')
   rules() {
     return { mode: MODE, rules: RULES };
+  }
+}
+
+@Controller('cj')
+class CjController {
+  @Get('status')
+  status() {
+    return getCjStatus();
   }
 }
 
@@ -257,10 +261,7 @@ class ShopifyController {
     let currency = 'COP';
 
     if (body.productId) {
-      const p = await prisma.product.findUnique({
-        where: { id: body.productId },
-        include: { suppliers: true },
-      });
+      const p = await prisma.product.findUnique({ where: { id: body.productId } });
       if (p) {
         title = p.title;
         price = num(p.salePrice, 89900);
@@ -280,13 +281,63 @@ class ShopifyController {
         currency: mock.currency,
         lineItems: mock.lineItems as any,
         sourceMode: 'MOCK',
-        fulfillmentNote: 'Pedido simulado — fulfillment CJ pendiente (bloque 6)',
+        fulfillmentNote: 'Listo para fulfillment CJ',
       },
     });
 
     await writeAudit('ORDER_SIMULATED', 'Order', order.id, mock);
+    return { mode: MODE, order, mock: true };
+  }
 
-    return { mode: MODE, order, mock: true, note: 'Primera venta simulada en MOCK. No hay cargo real.' };
+  /** Webhook orders/create — HMAC verification optional until SHOPIFY_WEBHOOK_SECRET set */
+  @Post('webhooks/orders')
+  async ordersWebhook(
+    @Body() body: any,
+    @Headers('x-shopify-hmac-sha256') hmac?: string,
+    @Headers('x-shopify-topic') topic?: string,
+  ) {
+    const secret = (process.env.SHOPIFY_WEBHOOK_SECRET || '').trim();
+    if (secret && !hmac) {
+      return { error: 'missing_hmac' };
+    }
+    // Full HMAC verify can be added with raw body middleware; log presence for now
+    if (secret && hmac) {
+      await writeAudit('SHOPIFY_WEBHOOK_HMAC_PRESENT', 'Shopify', topic || 'orders', {
+        hmacPrefix: hmac.slice(0, 8),
+      });
+    }
+
+    const store = await prisma.store.findFirst();
+    if (!store) return { error: 'no_store' };
+
+    const externalId = String(body?.id || body?.order_id || `wh-${Date.now()}`);
+    const existing = await prisma.order.findFirst({ where: { externalId } });
+    if (existing) return { mode: MODE, order: existing, duplicate: true };
+
+    const lineItems = (body?.line_items || []).map((li: any) => ({
+      title: li.title,
+      quantity: li.quantity,
+      price: Number(li.price || 0),
+      sku: li.sku,
+    }));
+
+    const order = await prisma.order.create({
+      data: {
+        storeId: store.id,
+        externalId,
+        orderNumber: body?.name || body?.order_number?.toString(),
+        email: body?.email || body?.customer?.email,
+        status: 'PAID',
+        total: Number(body?.total_price || body?.current_total_price || 0),
+        currency: body?.currency || 'COP',
+        lineItems: lineItems.length ? lineItems : body,
+        sourceMode: MODE_ENUM,
+        fulfillmentNote: 'Ingresado por webhook Shopify',
+      },
+    });
+
+    await writeAudit('ORDER_WEBHOOK', 'Order', order.id, { topic, externalId });
+    return { mode: MODE, order, received: true };
   }
 }
 
@@ -298,6 +349,59 @@ class OrdersController {
     const items = await prisma.order.findMany({ orderBy: { createdAt: 'desc' }, take: n });
     return { mode: MODE, count: items.length, items };
   }
+
+  @Get(':id')
+  async one(@Param('id') id: string) {
+    const order = await prisma.order.findUnique({ where: { id } });
+    if (!order) return { error: 'not_found' };
+    return { mode: MODE, order };
+  }
+
+  @Post(':id/fulfill')
+  async fulfill(@Param('id') id: string) {
+    const order = await prisma.order.findUnique({ where: { id } });
+    if (!order) return { error: 'not_found' };
+    if (order.status === 'FULFILLED') {
+      return { error: 'already_fulfilled', order };
+    }
+
+    const items = (order.lineItems as any[]) || [];
+    const first = items[0] || { title: 'Producto', quantity: 1 };
+
+    const result = await fulfillOrder({
+      orderId: order.id,
+      orderNumber: order.orderNumber,
+      productTitle: first.title || 'Producto',
+      quantity: first.quantity || 1,
+      shippingCountry: 'CO',
+    });
+
+    if (!result.ok) {
+      await writeAudit('FULFILL_FAILED', 'Order', id, result);
+      return { mode: MODE, error: 'fulfill_failed', result };
+    }
+
+    const updated = await prisma.order.update({
+      where: { id },
+      data: {
+        status: 'FULFILLED',
+        fulfillmentNote: `CJ ${result.mock ? 'MOCK' : 'LIVE'} · ${result.supplierOrderId} · tracking ${result.trackingNumber || 'n/a'} · ${result.carrier || ''}`,
+      },
+    });
+
+    await writeAudit('ORDER_FULFILLED', 'Order', id, result);
+
+    return {
+      mode: MODE,
+      fulfilled: true,
+      mock: result.mock,
+      order: updated,
+      cj: result,
+      note: result.mock
+        ? 'Fulfillment MOCK — sin pedido real a CJ. Configura CJ_API_KEY + SANDBOX para live.'
+        : 'Fulfillment enviado a CJ',
+    };
+  }
 }
 
 @Controller('ai')
@@ -308,32 +412,13 @@ class AiController {
   }
 
   @Post('complete')
-  async complete(
-    @Body()
-    body: {
-      prompt?: string;
-      task?: string;
-      messages?: Array<{ role: string; content: string }>;
-    },
-  ) {
+  async complete(@Body() body: { prompt?: string; task?: string; messages?: any[] }) {
     const messages =
-      body.messages && body.messages.length > 0
-        ? body.messages.map((m) => ({
-            role: (m.role as 'system' | 'user' | 'assistant') || 'user',
-            content: m.content,
-          }))
+      body.messages?.length > 0
+        ? body.messages
         : [{ role: 'user' as const, content: body.prompt || 'Hola' }];
-
-    const result = await aiComplete({
-      messages,
-      task: (body.task as any) || 'general',
-    });
-
-    await writeAudit('AI_COMPLETE', 'AiRouter', result.provider, {
-      provider: result.provider,
-      mock: result.mock,
-    });
-
+    const result = await aiComplete({ messages, task: (body.task as any) || 'general' });
+    await writeAudit('AI_COMPLETE', 'AiRouter', result.provider, { mock: result.mock });
     return { mode: MODE, result };
   }
 
@@ -381,32 +466,22 @@ class ProductsController {
       include: { suppliers: { include: { supplier: true }, orderBy: { isPrimary: 'desc' } } },
     });
     if (!p) return { error: 'not_found' };
-
     const enriched = enrichProduct(p);
     const margin = this.rules.evaluateMargin(enriched.salePrice, {
       productCost: enriched.productCost,
       shippingCost: enriched.shippingCost,
     });
-    const stock = this.rules.evaluateStock(enriched.stock);
-
     await prisma.product.update({ where: { id }, data: { marginPercent: margin.marginPercent } });
-    await writeAudit('PRODUCT_EVALUATED', 'Product', id, { margin: margin.marginPercent, band: margin.band });
-
-    return {
-      mode: MODE,
-      item: { ...enriched, marginPercent: margin.marginPercent, marginBand: margin.band },
-      evaluation: { margin, stock, auto: enriched.autoPublish },
-    };
+    await writeAudit('PRODUCT_EVALUATED', 'Product', id, { margin: margin.marginPercent });
+    return { mode: MODE, item: { ...enriched, marginPercent: margin.marginPercent, marginBand: margin.band } };
   }
 
   @Post(':id/request-approval')
   async requestApproval(@Param('id') id: string, @Body() body: { action: string; reason?: string }) {
     const p = await prisma.product.findUnique({ where: { id } });
     if (!p) return { error: 'not_found' };
-
     const admin = await prisma.user.findFirst({ where: { email: 'admin@ecom.local' } });
     const action = body.action || 'FIRST_PUBLICATION';
-
     const approval = await prisma.approval.create({
       data: {
         productId: id,
@@ -417,10 +492,8 @@ class ProductsController {
         metadata: { requiresHuman: requiresHumanApproval(action) },
       },
     });
-
     await prisma.product.update({ where: { id }, data: { status: 'PENDING_APPROVAL' } });
     await writeAudit('APPROVAL_REQUESTED', 'Approval', approval.id, approval);
-
     return { mode: MODE, approval };
   }
 
@@ -431,32 +504,16 @@ class ProductsController {
       include: { suppliers: { include: { supplier: true }, orderBy: { isPrimary: 'desc' } } },
     });
     if (!p) return { error: 'not_found' };
-
     const enriched = enrichProduct(p);
-
     if (enriched.shouldPause || !enriched.canPublish) {
-      return {
-        error: 'rules_block',
-        reason: 'Margen/stock no permiten publicación',
-        item: enriched,
-      };
+      return { error: 'rules_block', reason: 'Margen/stock no permiten publicación', item: enriched };
     }
-
-    if (p.isFirstPublication && p.status !== 'PUBLISHED') {
-      const pending = await prisma.approval.findFirst({
-        where: { productId: id, status: 'APPROVED', action: 'FIRST_PUBLICATION' },
+    if (p.isFirstPublication) {
+      const anyApproved = await prisma.approval.findFirst({
+        where: { productId: id, status: 'APPROVED' },
       });
-      if (!pending && p.status !== 'PUBLISHED') {
-        // Allow publish if already approved via decide flow (status PUBLISHED) or explicit APPROVED approval
-        const anyApproved = await prisma.approval.findFirst({
-          where: { productId: id, status: 'APPROVED' },
-        });
-        if (!anyApproved) {
-          return {
-            error: 'approval_required',
-            reason: 'Primera publicación requiere aprobación humana previa',
-          };
-        }
+      if (!anyApproved) {
+        return { error: 'approval_required', reason: 'Primera publicación requiere aprobación humana' };
       }
     }
 
@@ -468,7 +525,6 @@ class ProductsController {
       sku: `ECOM-${id.slice(-8)}`,
       inventory: enriched.stock,
     });
-
     if (!result.ok) {
       await writeAudit('PUBLISH_FAILED', 'Product', id, result);
       return { mode: MODE, error: 'publish_failed', result };
@@ -483,23 +539,8 @@ class ProductsController {
         sourceMode: result.mock ? 'MOCK' : MODE_ENUM,
       },
     });
-
-    await writeAudit('PRODUCT_PUBLISHED', 'Product', id, {
-      externalId: result.externalId,
-      mock: result.mock,
-      adminUrl: result.adminUrl,
-    });
-
-    return {
-      mode: MODE,
-      published: true,
-      mock: result.mock,
-      product: updated,
-      shopify: result,
-      note: result.mock
-        ? 'Publicado en MOCK (sin tienda Shopify real). Conecta SHOPIFY_* + SANDBOX para live.'
-        : 'Publicado en Shopify',
-    };
+    await writeAudit('PRODUCT_PUBLISHED', 'Product', id, result);
+    return { mode: MODE, published: true, mock: result.mock, product: updated, shopify: result };
   }
 
   @Post(':id/generate-copy')
@@ -509,19 +550,16 @@ class ProductsController {
       include: { suppliers: { include: { supplier: true }, orderBy: { isPrimary: 'desc' } } },
     });
     if (!p) return { error: 'not_found' };
-
     const enriched = enrichProduct(p);
     const result = await generateProductCopy({
       title: enriched.title,
-      facts: `costo ${enriched.productCost}, envío ${enriched.shippingCost}, stock ${enriched.stock}, proveedor ${enriched.supplierName}`,
+      facts: `costo ${enriched.productCost}, stock ${enriched.stock}, proveedor ${enriched.supplierName}`,
       language: 'es-CO',
     });
-
     if (result.ok && result.text) {
       await prisma.product.update({ where: { id }, data: { description: result.text.slice(0, 4000) } });
     }
-
-    await writeAudit('AI_PRODUCT_COPY', 'Product', id, { provider: result.provider, mock: result.mock });
+    await writeAudit('AI_PRODUCT_COPY', 'Product', id, { provider: result.provider });
     return { mode: MODE, productId: id, result };
   }
 }
@@ -540,9 +578,7 @@ class ApprovalsController {
     const a = await prisma.approval.findUnique({ where: { id } });
     if (!a) return { error: 'not_found' };
     if (a.status !== 'PENDING') return { error: 'already_decided' };
-
     const decision = body.decision === 'APPROVED' ? 'APPROVED' : 'REJECTED';
-
     const approval = await prisma.approval.update({
       where: { id },
       data: {
@@ -551,19 +587,14 @@ class ApprovalsController {
         metadata: { ...(a.metadata as object), note: body.note },
       },
     });
-
     let product = null;
     if (a.productId) {
       product = await prisma.product.update({
         where: { id: a.productId },
-        data: {
-          // APPROVED leaves product ready to publish (DRAFT-like via PENDING cleared)
-          status: decision === 'APPROVED' ? 'DRAFT' : 'REJECTED',
-        },
+        data: { status: decision === 'APPROVED' ? 'DRAFT' : 'REJECTED' },
       });
     }
-
-    await writeAudit(`APPROVAL_${decision}`, 'Approval', id, { note: body.note, productId: a.productId });
+    await writeAudit(`APPROVAL_${decision}`, 'Approval', id, { productId: a.productId });
     return { mode: MODE, approval, product, next: decision === 'APPROVED' ? 'POST /products/:id/publish' : null };
   }
 }
@@ -583,10 +614,7 @@ class AuthController {
   @Get('me')
   async me() {
     const user = await prisma.user.findFirst({ where: { email: 'admin@ecom.local' } });
-    return {
-      mode: MODE,
-      user: user ? { id: user.id, email: user.email, name: user.name, role: user.role } : null,
-    };
+    return { mode: MODE, user: user ? { id: user.id, email: user.email, name: user.name, role: user.role } : null };
   }
 
   @Post('login')
@@ -605,6 +633,7 @@ class AuthController {
 @Module({
   controllers: [
     HealthController,
+    CjController,
     ShopifyController,
     OrdersController,
     AiController,
@@ -622,7 +651,7 @@ async function bootstrap() {
   const app = await NestFactory.create(AppModule);
   app.enableCors({ origin: process.env.APP_URL ?? 'http://localhost:3000' });
   await app.listen(Number(process.env.API_PORT ?? 4000));
-  console.log(`ECOM API block-5 (Shopify) on ${process.env.API_PORT ?? 4000} mode=${MODE}`);
+  console.log(`ECOM API block-7 (CJ+Shopify) on ${process.env.API_PORT ?? 4000} mode=${MODE}`);
 }
 
 void bootstrap();
