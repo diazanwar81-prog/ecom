@@ -36,6 +36,8 @@ export default function Home() {
   const [approvals, setApprovals] = useState<Approval[]>([]);
   const [audits, setAudits] = useState<any[]>([]);
   const [rules, setRules] = useState<any>(null);
+  const [aiStatus, setAiStatus] = useState<any>(null);
+  const [aiResult, setAiResult] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -44,18 +46,20 @@ export default function Home() {
     setLoading(true);
     setError(null);
     try {
-      const [h, p, a, au, r] = await Promise.all([
+      const [h, p, a, au, r, ai] = await Promise.all([
         fetch(`${API}/health`).then((x) => x.json()),
         fetch(`${API}/products`).then((x) => x.json()),
         fetch(`${API}/approvals`).then((x) => x.json()),
         fetch(`${API}/audit?limit=20`).then((x) => x.json()),
         fetch(`${API}/rules`).then((x) => x.json()),
+        fetch(`${API}/ai/status`).then((x) => x.json()),
       ]);
       setMode(h.mode || 'MOCK');
       setProducts(p.items || []);
       setApprovals(a.items || []);
       setAudits(au.items || []);
       setRules(r);
+      setAiStatus(ai);
     } catch (e: any) {
       setError(e?.message || 'No se pudo conectar con la API');
     } finally {
@@ -99,6 +103,31 @@ export default function Home() {
     await load();
   }
 
+  async function generateCopy(id: string) {
+    setMessage(null);
+    setAiResult(null);
+    const res = await fetch(`${API}/products/${id}/generate-copy`, { method: 'POST' });
+    const data = await res.json();
+    const r = data.result;
+    setAiResult(
+      `[${r?.provider}${r?.mock ? ' · MOCK' : ''}] ${r?.text || r?.error || 'sin texto'}`,
+    );
+    setMessage(`Copy generado vía ${r?.provider} (mock=${r?.mock})`);
+    await load();
+  }
+
+  async function testAiPrompt() {
+    setAiResult(null);
+    const res = await fetch(`${API}/ai/complete`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt: 'Resume en una frase qué es ECOM dropshipping', task: 'general' }),
+    });
+    const data = await res.json();
+    const r = data.result;
+    setAiResult(`[${r?.provider}${r?.mock ? ' · MOCK' : ''}] ${r?.text || r?.error}`);
+  }
+
   const bandColor = (b?: string) => {
     if (b === 'IDEAL') return '#16a34a';
     if (b === 'OPERATIONAL') return '#2563eb';
@@ -111,7 +140,7 @@ export default function Home() {
     <main style={{ fontFamily: 'system-ui, sans-serif', margin: '0 auto', maxWidth: 1100, padding: '1.5rem' }}>
       <header style={{ marginBottom: '1.5rem' }}>
         <p style={{ color: '#64748b', margin: 0 }}>ECOM · Panel operativo</p>
-        <h1 style={{ margin: '0.25rem 0' }}>Bloque 2 — Reglas, candidatos MOCK y aprobaciones</h1>
+        <h1 style={{ margin: '0.25rem 0' }}>Bloque 3 — AI Router (Gemini + Hugging Face)</h1>
         <p>
           Modo actual: <strong style={{ color: mode === 'MOCK' ? '#ca8a04' : '#16a34a' }}>{mode}</strong>
           {' · '}
@@ -122,6 +151,32 @@ export default function Home() {
         {message && <p style={{ color: '#2563eb' }}>{message}</p>}
       </header>
 
+      {aiStatus && (
+        <section style={{ background: '#f0f9ff', border: '1px solid #bae6fd', borderRadius: 8, padding: '1rem', marginBottom: '1.5rem' }}>
+          <h2 style={{ marginTop: 0 }}>AI Router</h2>
+          <p style={{ fontSize: 14, margin: '0 0 0.5rem' }}>
+            Presupuesto automático: <strong>${aiStatus.budgetUsdAutomatic} USD</strong>
+            {' · '}Paid AI permitido: {aiStatus.allowPaid ? 'sí' : 'no'}
+          </p>
+          <ul style={{ margin: 0, paddingLeft: '1.2rem', fontSize: 14 }}>
+            {(aiStatus.providers || []).map((p: any) => (
+              <li key={p.id}>
+                <strong>{p.id}</strong> — modelo {p.model} —{' '}
+                {p.configured ? 'clave presente' : 'sin clave'} — {p.note}
+              </li>
+            ))}
+          </ul>
+          <div style={{ marginTop: 12 }}>
+            <button onClick={testAiPrompt} style={{ cursor: 'pointer' }}>Probar complete (MOCK)</button>
+          </div>
+          {aiResult && (
+            <pre style={{ marginTop: 12, whiteSpace: 'pre-wrap', background: '#fff', padding: 12, borderRadius: 6, fontSize: 13 }}>
+              {aiResult}
+            </pre>
+          )}
+        </section>
+      )}
+
       {rules && (
         <section style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 8, padding: '1rem', marginBottom: '1.5rem' }}>
           <h2 style={{ marginTop: 0 }}>Motor de reglas</h2>
@@ -130,7 +185,6 @@ export default function Home() {
             <li>Margen mínimo operativo ≥ {rules.rules?.MARGIN_MIN}%</li>
             <li>Alerta 30–34.99% · Pausa {'<30%'} o stock = 0</li>
             <li>Máx. {rules.rules?.MAX_PRICE_CHANGE_PER_DAY} cambios de precio/día · ±{rules.rules?.MAX_PRICE_VARIATION_PERCENT}%</li>
-            <li>Opportunity score mínimo {rules.rules?.MIN_OPPORTUNITY_SCORE} · Confianza auto ≥ {rules.rules?.AUTO_PUBLISH_CONFIDENCE}%</li>
           </ul>
         </section>
       )}
@@ -178,6 +232,7 @@ export default function Home() {
               <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
                 <button onClick={() => evaluate(p.id)} style={{ cursor: 'pointer' }}>Re-evaluar</button>
                 <button onClick={() => requestApproval(p.id)} style={{ cursor: 'pointer' }}>Solicitar aprobación</button>
+                <button onClick={() => generateCopy(p.id)} style={{ cursor: 'pointer' }}>Generar copy (IA)</button>
               </div>
             </article>
           ))}
@@ -192,7 +247,6 @@ export default function Home() {
             <div key={a.id} style={{ border: '1px solid #e2e8f0', borderRadius: 8, padding: '0.75rem' }}>
               <div><strong>{a.action}</strong> · {a.status}</div>
               <div style={{ fontSize: 14, color: '#64748b' }}>{a.reason}</div>
-              <div style={{ fontSize: 12 }}>{a.id} · producto {a.productId}</div>
               {a.status === 'PENDING' && (
                 <div style={{ marginTop: 8, display: 'flex', gap: 8 }}>
                   <button onClick={() => decide(a.id, 'APPROVED')} style={{ cursor: 'pointer' }}>Aprobar</button>
@@ -216,7 +270,7 @@ export default function Home() {
       </section>
 
       <footer style={{ marginTop: '2rem', fontSize: 12, color: '#94a3b8' }}>
-        Ninguna publicación, pedido ni cargo real se ejecuta en modo MOCK. Shopify, CJ, IA y pagos permanecen desconectados.
+        AI Router: Gemini → Hugging Face → MOCK. Presupuesto automático $0. Sin claves = solo MOCK. No hay cobros automáticos.
       </footer>
     </main>
   );
