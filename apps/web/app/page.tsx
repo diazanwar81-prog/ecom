@@ -128,7 +128,7 @@ export default function Home() {
           <ul style={{ margin: 0, paddingLeft: '1.2rem' }}>
             <li>Margen ideal ≥ {rules.rules?.MARGIN_IDEAL}%</li>
             <li>Margen mínimo operativo ≥ {rules.rules?.MARGIN_MIN}%</li>
-            <li>Alerta 30–34.99% · Pausa <30% o stock = 0</li>
+            <li>Alerta 30–34.99% · Pausa {'<30%'} o stock = 0</li>
             <li>Máx. {rules.rules?.MAX_PRICE_CHANGE_PER_DAY} cambios de precio/día · ±{rules.rules?.MAX_PRICE_VARIATION_PERCENT}%</li>
             <li>Opportunity score mínimo {rules.rules?.MIN_OPPORTUNITY_SCORE} · Confianza auto ≥ {rules.rules?.AUTO_PUBLISH_CONFIDENCE}%</li>
           </ul>
