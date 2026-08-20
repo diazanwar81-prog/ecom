@@ -1,0 +1,132 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum RuntimeMode {
+  MOCK
+  SANDBOX
+  REAL
+}
+
+enum ProductStatus {
+  DETECTED
+  EVALUATING
+  PENDING_APPROVAL
+  DRAFT
+  PUBLISHED
+  PAUSED
+  ARCHIVED
+  REJECTED
+}
+
+enum ApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  EXPIRED
+}
+
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  stores    Store[]
+  approvals Approval[]
+  audits    AuditLog[]
+}
+
+model Store {
+  id          String   @id @default(cuid())
+  name        String
+  shopDomain  String?  @unique
+  countryCode String   @default("CO")
+  currency    String   @default("COP")
+  timezone    String   @default("America/Bogota")
+  runtimeMode RuntimeMode @default(MOCK)
+  ownerId     String
+  owner       User     @relation(fields: [ownerId], references: [id])
+  products    Product[]
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model Product {
+  id               String        @id @default(cuid())
+  storeId          String
+  store            Store         @relation(fields: [storeId], references: [id])
+  title            String
+  status           ProductStatus @default(DETECTED)
+  opportunityScore Int?
+  marginPercent    Decimal?      @db.Decimal(5, 2)
+  sourceMode       RuntimeMode   @default(MOCK)
+  externalId       String?
+  suppliers        ProductSupplier[]
+  approvals        Approval[]
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+
+  @@index([storeId, status])
+}
+
+model Supplier {
+  id          String   @id @default(cuid())
+  name        String
+  apiEnabled  Boolean  @default(false)
+  verified    Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  products    ProductSupplier[]
+}
+
+model ProductSupplier {
+  id                String   @id @default(cuid())
+  productId         String
+  supplierId        String
+  product           Product  @relation(fields: [productId], references: [id])
+  supplier          Supplier @relation(fields: [supplierId], references: [id])
+  countryCode       String
+  supplierScore     Decimal? @db.Decimal(5, 2)
+  productCost       Decimal? @db.Decimal(12, 2)
+  shippingCost      Decimal? @db.Decimal(12, 2)
+  stock             Int?
+  isPrimary         Boolean  @default(false)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@unique([productId, supplierId, countryCode])
+}
+
+model Approval {
+  id          String         @id @default(cuid())
+  productId   String?
+  product     Product?       @relation(fields: [productId], references: [id])
+  requestedBy String
+  approverId  String?
+  approver    User?          @relation(fields: [approverId], references: [id])
+  action      String
+  reason      String
+  status      ApprovalStatus @default(PENDING)
+  createdAt   DateTime       @default(now())
+  decidedAt   DateTime?
+
+  @@index([status, createdAt])
+}
+
+model AuditLog {
+  id          String      @id @default(cuid())
+  actorId     String?
+  actor       User?       @relation(fields: [actorId], references: [id])
+  action      String
+  entityType  String
+  entityId    String
+  runtimeMode RuntimeMode @default(MOCK)
+  metadata    Json?
+  createdAt   DateTime    @default(now())
+
+  @@index([entityType, entityId, createdAt])
+}
