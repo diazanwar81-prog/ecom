@@ -10,10 +10,14 @@ import {
   RULES,
   type CostBreakdown,
 } from '../../../packages/rules/src/index';
+import {
+  complete as aiComplete,
+  generateProductCopy,
+  getRouterStatus,
+} from '../../../packages/ai-router/src/index';
 
 const MODE = (process.env.ECOM_MODE ?? 'MOCK') as 'MOCK' | 'SANDBOX' | 'REAL';
 
-/** In-memory MOCK store for block 2 — no real DB writes required for panel demo */
 const mockState = {
   products: [] as Array<Record<string, unknown>>,
   approvals: [] as Array<Record<string, unknown>>,
@@ -147,7 +151,8 @@ class HealthController {
       service: 'ecom-api',
       mode: MODE,
       timestamp: new Date().toISOString(),
-      block: 2,
+      block: 3,
+      aiRouter: true,
     };
   }
 
@@ -165,6 +170,75 @@ class HealthController {
         maxPriceVariationPercent: 10,
       },
     };
+  }
+}
+
+@Controller('ai')
+class AiController {
+  @Get('status')
+  status() {
+    return getRouterStatus();
+  }
+
+  @Post('complete')
+  async complete(
+    @Body()
+    body: {
+      prompt?: string;
+      task?: string;
+      messages?: Array<{ role: string; content: string }>;
+    },
+  ) {
+    const messages =
+      body.messages && body.messages.length > 0
+        ? body.messages.map((m) => ({
+            role: (m.role as 'system' | 'user' | 'assistant') || 'user',
+            content: m.content,
+          }))
+        : [{ role: 'user' as const, content: body.prompt || 'Hola' }];
+
+    const result = await aiComplete({
+      messages,
+      task: (body.task as any) || 'general',
+    });
+
+    mockState.audits.unshift({
+      id: `audit-${Date.now()}`,
+      action: 'AI_COMPLETE',
+      entityType: 'AiRouter',
+      entityId: result.provider,
+      runtimeMode: MODE,
+      metadata: {
+        provider: result.provider,
+        mock: result.mock,
+        pending: result.pending,
+        task: body.task,
+      },
+      createdAt: new Date().toISOString(),
+    });
+
+    return { mode: MODE, result };
+  }
+
+  @Post('product-copy')
+  async productCopy(@Body() body: { title?: string; facts?: string; language?: string }) {
+    const result = await generateProductCopy({
+      title: body.title || 'Producto',
+      facts: body.facts || '',
+      language: body.language || 'es-CO',
+    });
+
+    mockState.audits.unshift({
+      id: `audit-${Date.now()}`,
+      action: 'AI_PRODUCT_COPY',
+      entityType: 'AiRouter',
+      entityId: result.provider,
+      runtimeMode: MODE,
+      metadata: { mock: result.mock, title: body.title },
+      createdAt: new Date().toISOString(),
+    });
+
+    return { mode: MODE, result };
   }
 }
 
@@ -261,6 +335,30 @@ class ProductsController {
 
     return { mode: MODE, approval };
   }
+
+  @Post(':id/generate-copy')
+  async generateCopy(@Param('id') id: string) {
+    const p = mockState.products.find((x) => x.id === id) as any;
+    if (!p) return { error: 'not_found' };
+
+    const result = await generateProductCopy({
+      title: String(p.title),
+      facts: `costo ${p.productCost}, envío ${p.shippingCost}, stock ${p.stock}, proveedor ${p.supplierName}`,
+      language: 'es-CO',
+    });
+
+    mockState.audits.unshift({
+      id: `audit-${Date.now()}`,
+      action: 'AI_PRODUCT_COPY',
+      entityType: 'Product',
+      entityId: id,
+      runtimeMode: MODE,
+      metadata: { provider: result.provider, mock: result.mock },
+      createdAt: new Date().toISOString(),
+    });
+
+    return { mode: MODE, productId: id, result };
+  }
 }
 
 @Controller('approvals')
@@ -332,7 +430,6 @@ class AuthController {
 
   @Post('login')
   login(@Body() body: { email?: string; password?: string }) {
-    // MOCK only — never validates real secrets
     if (MODE !== 'MOCK') {
       return { error: 'Login real no implementado en este bloque; use MOCK' };
     }
@@ -357,6 +454,7 @@ class AuthController {
 @Module({
   controllers: [
     HealthController,
+    AiController,
     ProductsController,
     ApprovalsController,
     AuditController,
@@ -374,7 +472,7 @@ async function bootstrap() {
   seedMockProducts();
   await app.listen(Number(process.env.API_PORT ?? 4000));
   // eslint-disable-next-line no-console
-  console.log(`ECOM API block-2 listening on ${process.env.API_PORT ?? 4000} mode=${MODE}`);
+  console.log(`ECOM API block-3 (AI Router) on ${process.env.API_PORT ?? 4000} mode=${MODE}`);
 }
 
 void bootstrap();
