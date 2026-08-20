@@ -3,7 +3,7 @@
  * - Providers: Gemini (primary), Hugging Face (fallback), Mock
  * - Budget: $0 automatic — never triggers paid upgrades
  * - Modes: MOCK | SANDBOX | REAL
- * - If no key or quota exhausted → ASSET_PENDING / graceful failure, never invent success as real
+ * - Env is read per request (trim + normalize) to avoid stale values / \r issues
  */
 
 export type RuntimeMode = 'MOCK' | 'SANDBOX' | 'REAL';
@@ -19,7 +19,6 @@ export interface AiRequest {
   task?: 'copy' | 'seo' | 'analysis' | 'general' | 'product_title' | 'product_description';
   maxTokens?: number;
   temperature?: number;
-  /** Force a provider; otherwise router picks by availability */
   prefer?: ProviderId[];
 }
 
@@ -29,7 +28,6 @@ export interface AiResponse {
   provider: ProviderId;
   model: string;
   mode: RuntimeMode;
-  /** true when response is simulated, not from a live model */
   mock: boolean;
   pending?: boolean;
   error?: string;
@@ -49,67 +47,94 @@ export interface RouterStatus {
   mode: RuntimeMode;
   budgetUsdAutomatic: number;
   allowPaid: boolean;
+  forceLive: boolean;
   providers: ProviderStatus[];
   defaultChain: ProviderId[];
 }
 
-const MODE = (process.env.ECOM_MODE ?? 'MOCK') as RuntimeMode;
-const ALLOW_PAID = process.env.ECOM_ALLOW_PAID_AI === 'true';
-const GEMINI_KEY = (process.env.GEMINI_API_KEY ?? '').trim();
-const HF_TOKEN = (process.env.HF_TOKEN ?? process.env.HUGGINGFACE_API_KEY ?? '').trim();
-const GEMINI_MODEL = process.env.GEMINI_MODEL ?? 'gemini-2.0-flash';
-const HF_MODEL = process.env.HF_MODEL ?? 'mistralai/Mistral-7B-Instruct-v0.3';
+function env(name: string, fallback = ''): string {
+  return (process.env[name] ?? fallback).replace(/\r/g, '').trim();
+}
+
+function envBool(name: string): boolean {
+  const v = env(name).toLowerCase();
+  return v === 'true' || v === '1' || v === 'yes';
+}
+
+function runtimeMode(): RuntimeMode {
+  const m = env('ECOM_MODE', 'MOCK').toUpperCase();
+  if (m === 'SANDBOX' || m === 'REAL') return m;
+  return 'MOCK';
+}
+
+function geminiKey() {
+  return env('GEMINI_API_KEY');
+}
+function hfToken() {
+  return env('HF_TOKEN') || env('HUGGINGFACE_API_KEY');
+}
+function geminiModel() {
+  return env('GEMINI_MODEL', 'gemini-2.0-flash') || 'gemini-2.0-flash';
+}
+function hfModel() {
+  return env('HF_MODEL', 'mistralai/Mistral-7B-Instruct-v0.3') || 'mistralai/Mistral-7B-Instruct-v0.3';
+}
 
 function hasKey(k: string) {
   return k.length > 8;
 }
 
-/** Never treat empty/placeholder as real credentials */
 function isPlaceholder(k: string) {
   const lower = k.toLowerCase();
   return !k || lower.includes('replace') || lower.includes('your-') || lower === 'test';
 }
 
 export function getRouterStatus(): RouterStatus {
-  const geminiOk = hasKey(GEMINI_KEY) && !isPlaceholder(GEMINI_KEY);
-  const hfOk = hasKey(HF_TOKEN) && !isPlaceholder(HF_TOKEN);
+  const mode = runtimeMode();
+  const forceLive = envBool('ECOM_AI_FORCE_LIVE');
+  const allowPaid = envBool('ECOM_ALLOW_PAID_AI');
+  const gKey = geminiKey();
+  const hKey = hfToken();
+  const geminiOk = hasKey(gKey) && !isPlaceholder(gKey);
+  const hfOk = hasKey(hKey) && !isPlaceholder(hKey);
+  const liveAllowed = mode !== 'MOCK' || forceLive;
 
   return {
-    mode: MODE,
+    mode,
     budgetUsdAutomatic: 0,
-    allowPaid: ALLOW_PAID,
+    allowPaid,
+    forceLive,
     defaultChain: ['gemini', 'huggingface', 'mock'],
     providers: [
       {
         id: 'gemini',
         configured: geminiOk,
-        enabled: geminiOk && (MODE !== 'MOCK' || process.env.ECOM_AI_FORCE_LIVE === 'true'),
-        model: GEMINI_MODEL,
+        enabled: geminiOk && liveAllowed,
+        model: geminiModel(),
         note: geminiOk
-          ? 'API key presente — llamadas solo si modo no es MOCK estricto o ECOM_AI_FORCE_LIVE=true'
-          : 'Sin GEMINI_API_KEY — no se realizarán llamadas reales',
+          ? `Key presente · liveAllowed=${liveAllowed}`
+          : 'Sin GEMINI_API_KEY',
       },
       {
         id: 'huggingface',
         configured: hfOk,
-        enabled: hfOk && (MODE !== 'MOCK' || process.env.ECOM_AI_FORCE_LIVE === 'true'),
-        model: HF_MODEL,
-        note: hfOk
-          ? 'Token presente — Inference API gratuita cuando esté disponible'
-          : 'Sin HF_TOKEN — fallback no disponible',
+        enabled: hfOk && liveAllowed,
+        model: hfModel(),
+        note: hfOk ? `Token presente · liveAllowed=${liveAllowed}` : 'Sin HF_TOKEN',
       },
       {
         id: 'mock',
         configured: true,
         enabled: true,
         model: 'ecom-mock-v1',
-        note: 'Respuestas simuladas etiquetadas MOCK — sin coste ni red externa',
+        note: 'Fallback local sin coste',
       },
     ],
   };
 }
 
 function mockComplete(req: AiRequest): AiResponse {
+  const mode = runtimeMode();
   const lastUser = [...req.messages].reverse().find((m) => m.role === 'user')?.content ?? '';
   const task = req.task ?? 'general';
   let text = '';
@@ -125,13 +150,13 @@ function mockComplete(req: AiRequest): AiResponse {
         `Basado en: ${lastUser.slice(0, 120) || 'ficha de producto'}`;
       break;
     case 'seo':
-      text = `[MOCK] meta_title | meta_description | keywords (simulados, no indexar como reales)`;
+      text = `[MOCK] meta_title | meta_description | keywords (simulados)`;
       break;
     case 'analysis':
-      text = `[MOCK] Análisis de oportunidad: demanda media, competencia moderada, margen sujeto a reglas ≥35%.`;
+      text = `[MOCK] Análisis de oportunidad: demanda media, competencia moderada, margen ≥35%.`;
       break;
     case 'copy':
-      text = `[MOCK] Copy de venta: resuelve el problema del cliente con beneficios verificables. CTA claro.`;
+      text = `[MOCK] Copy de venta con beneficios verificables. CTA claro.`;
       break;
     default:
       text = `[MOCK] Respuesta simulada del AI Router. Entrada: ${lastUser.slice(0, 200)}`;
@@ -142,7 +167,7 @@ function mockComplete(req: AiRequest): AiResponse {
     text,
     provider: 'mock',
     model: 'ecom-mock-v1',
-    mode: MODE,
+    mode,
     mock: true,
     latencyMs: 5,
   };
@@ -150,23 +175,22 @@ function mockComplete(req: AiRequest): AiResponse {
 
 async function callGemini(req: AiRequest): Promise<AiResponse> {
   const started = Date.now();
-  if (!hasKey(GEMINI_KEY) || isPlaceholder(GEMINI_KEY)) {
+  const mode = runtimeMode();
+  const key = geminiKey();
+  const model = geminiModel();
+
+  if (!hasKey(key) || isPlaceholder(key)) {
     return {
       ok: false,
       text: '',
       provider: 'gemini',
-      model: GEMINI_MODEL,
-      mode: MODE,
+      model,
+      mode,
       mock: false,
       pending: true,
       error: 'GEMINI_API_KEY no configurada',
       latencyMs: Date.now() - started,
     };
-  }
-
-  // Budget guard: never auto-upgrade paid
-  if (!ALLOW_PAID && MODE === 'REAL') {
-    // Still allow free-tier attempts; paid flag only blocks known paid-only paths
   }
 
   const contents = req.messages
@@ -179,8 +203,8 @@ async function callGemini(req: AiRequest): Promise<AiResponse> {
   const system = req.messages.find((m) => m.role === 'system')?.content;
 
   const url =
-    `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(GEMINI_MODEL)}:generateContent` +
-    `?key=${encodeURIComponent(GEMINI_KEY)}`;
+    `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent` +
+    `?key=${encodeURIComponent(key)}`;
 
   const body: Record<string, unknown> = {
     contents,
@@ -209,13 +233,11 @@ async function callGemini(req: AiRequest): Promise<AiResponse> {
         ok: false,
         text: '',
         provider: 'gemini',
-        model: GEMINI_MODEL,
-        mode: MODE,
+        model,
+        mode,
         mock: false,
         pending: quota,
-        error: quota
-          ? `Cuota Gemini agotada o límite free tier — sin cobro automático. ${msg}`
-          : msg,
+        error: quota ? `Cuota/límite Gemini — sin cobro automático. ${msg}` : msg,
         latencyMs: Date.now() - started,
       };
     }
@@ -227,8 +249,8 @@ async function callGemini(req: AiRequest): Promise<AiResponse> {
       ok: Boolean(text),
       text: text || '',
       provider: 'gemini',
-      model: GEMINI_MODEL,
-      mode: MODE,
+      model,
+      mode,
       mock: false,
       error: text ? undefined : 'Respuesta vacía de Gemini',
       usage: {
@@ -242,8 +264,8 @@ async function callGemini(req: AiRequest): Promise<AiResponse> {
       ok: false,
       text: '',
       provider: 'gemini',
-      model: GEMINI_MODEL,
-      mode: MODE,
+      model,
+      mode,
       mock: false,
       pending: true,
       error: e?.message || 'Error de red Gemini',
@@ -254,13 +276,17 @@ async function callGemini(req: AiRequest): Promise<AiResponse> {
 
 async function callHuggingFace(req: AiRequest): Promise<AiResponse> {
   const started = Date.now();
-  if (!hasKey(HF_TOKEN) || isPlaceholder(HF_TOKEN)) {
+  const mode = runtimeMode();
+  const token = hfToken();
+  const model = hfModel();
+
+  if (!hasKey(token) || isPlaceholder(token)) {
     return {
       ok: false,
       text: '',
       provider: 'huggingface',
-      model: HF_MODEL,
-      mode: MODE,
+      model,
+      mode,
       mock: false,
       pending: true,
       error: 'HF_TOKEN no configurado',
@@ -271,10 +297,10 @@ async function callHuggingFace(req: AiRequest): Promise<AiResponse> {
   const prompt = req.messages.map((m) => `${m.role}: ${m.content}`).join('\n');
 
   try {
-    const res = await fetch(`https://api-inference.huggingface.co/models/${HF_MODEL}`, {
+    const res = await fetch(`https://api-inference.huggingface.co/models/${model}`, {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${HF_TOKEN}`,
+        Authorization: `Bearer ${token}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
@@ -296,8 +322,8 @@ async function callHuggingFace(req: AiRequest): Promise<AiResponse> {
         ok: false,
         text: '',
         provider: 'huggingface',
-        model: HF_MODEL,
-        mode: MODE,
+        model,
+        mode,
         mock: false,
         pending: true,
         error: loading ? `Modelo cargando: ${msg}` : String(msg),
@@ -318,8 +344,8 @@ async function callHuggingFace(req: AiRequest): Promise<AiResponse> {
       ok: Boolean(text),
       text,
       provider: 'huggingface',
-      model: HF_MODEL,
-      mode: MODE,
+      model,
+      mode,
       mock: false,
       latencyMs: Date.now() - started,
     };
@@ -328,8 +354,8 @@ async function callHuggingFace(req: AiRequest): Promise<AiResponse> {
       ok: false,
       text: '',
       provider: 'huggingface',
-      model: HF_MODEL,
-      mode: MODE,
+      model,
+      mode,
       mock: false,
       pending: true,
       error: e?.message || 'Error de red Hugging Face',
@@ -338,18 +364,12 @@ async function callHuggingFace(req: AiRequest): Promise<AiResponse> {
   }
 }
 
-/**
- * Complete a prompt via the router.
- * In MOCK mode (default): always uses mock unless ECOM_AI_FORCE_LIVE=true and keys exist.
- * Never charges; on quota/errors falls back to next provider, then mock/pending.
- */
 export async function complete(req: AiRequest): Promise<AiResponse> {
   const status = getRouterStatus();
   const chain: ProviderId[] =
     req.prefer && req.prefer.length > 0 ? req.prefer : status.defaultChain;
 
-  const forceLive = process.env.ECOM_AI_FORCE_LIVE === 'true';
-  const useLive = MODE !== 'MOCK' || forceLive;
+  const useLive = status.mode !== 'MOCK' || status.forceLive;
 
   if (!useLive) {
     return mockComplete(req);
@@ -375,14 +395,13 @@ export async function complete(req: AiRequest): Promise<AiResponse> {
     }
   }
 
-  // Final safe fallback — never invent a “real” success
   const fallback = mockComplete(req);
   return {
     ...fallback,
     ok: true,
     pending: true,
-    error: `Todos los proveedores fallaron o no configurados. Fallback MOCK. Detalle: ${errors.join(' | ')}`,
-    text: fallback.text + '\n\n[PENDING: sin respuesta live; usar solo como borrador etiquetado MOCK]',
+    error: `Proveedores live fallaron. Fallback MOCK. ${errors.join(' | ')}`,
+    text: `${fallback.text}\n\n[PENDING live] ${errors.join(' | ')}`,
   };
 }
 
@@ -397,7 +416,7 @@ export async function generateProductCopy(input: {
       {
         role: 'system',
         content:
-          'Eres copywriter de e-commerce para ECOM. Solo usa hechos verificables. No inventes garantías, certificaciones ni beneficios médicos. Idioma: ' +
+          'Eres copywriter de e-commerce para ECOM. Solo hechos verificables. Sin promesas médicas. Idioma: ' +
           (input.language ?? 'es-CO'),
       },
       {
