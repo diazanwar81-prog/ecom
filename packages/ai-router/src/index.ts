@@ -2,8 +2,8 @@
  * ECOM AI Router
  * - Providers: Gemini (primary), Hugging Face (fallback), Mock
  * - Budget: $0 automatic — never triggers paid upgrades
- * - Modes: MOCK | SANDBOX | REAL
- * - Env is read per request (trim + normalize) to avoid stale values / \r issues
+ * - Env read per request (trim + normalize)
+ * - Live failures always surface error details (never silent mock)
  */
 
 export type RuntimeMode = 'MOCK' | 'SANDBOX' | 'REAL';
@@ -31,6 +31,7 @@ export interface AiResponse {
   mock: boolean;
   pending?: boolean;
   error?: string;
+  attempts?: string[];
   usage?: { promptTokens?: number; completionTokens?: number };
   latencyMs: number;
 }
@@ -104,7 +105,7 @@ export function getRouterStatus(): RouterStatus {
     budgetUsdAutomatic: 0,
     allowPaid,
     forceLive,
-    defaultChain: ['gemini', 'huggingface', 'mock'],
+    defaultChain: ['gemini', 'huggingface'],
     providers: [
       {
         id: 'gemini',
@@ -112,7 +113,7 @@ export function getRouterStatus(): RouterStatus {
         enabled: geminiOk && liveAllowed,
         model: geminiModel(),
         note: geminiOk
-          ? `Key presente · liveAllowed=${liveAllowed}`
+          ? `Key presente · liveAllowed=${liveAllowed} · prefijo=${gKey.slice(0, 4)}…`
           : 'Sin GEMINI_API_KEY',
       },
       {
@@ -296,78 +297,86 @@ async function callHuggingFace(req: AiRequest): Promise<AiResponse> {
 
   const prompt = req.messages.map((m) => `${m.role}: ${m.content}`).join('\n');
 
-  try {
-    const res = await fetch(`https://api-inference.huggingface.co/models/${model}`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        inputs: prompt,
-        parameters: {
-          max_new_tokens: req.maxTokens ?? 512,
-          temperature: req.temperature ?? 0.4,
-          return_full_text: false,
+  // Primary: classic Inference API; secondary path tried only if first fails hard
+  const endpoints = [
+    `https://api-inference.huggingface.co/models/${model}`,
+    `https://router.huggingface.co/hf-inference/models/${model}`,
+  ];
+
+  let lastError = 'HF sin respuesta';
+
+  for (const endpoint of endpoints) {
+    try {
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
         },
-      }),
-    });
+        body: JSON.stringify({
+          inputs: prompt,
+          parameters: {
+            max_new_tokens: req.maxTokens ?? 512,
+            temperature: req.temperature ?? 0.4,
+            return_full_text: false,
+          },
+        }),
+      });
 
-    const data = (await res.json()) as any;
+      const data = (await res.json()) as any;
 
-    if (!res.ok) {
-      const msg = data?.error || `HuggingFace HTTP ${res.status}`;
-      const loading = /loading|currently loading/i.test(String(msg));
-      return {
-        ok: false,
-        text: '',
-        provider: 'huggingface',
-        model,
-        mode,
-        mock: false,
-        pending: true,
-        error: loading ? `Modelo cargando: ${msg}` : String(msg),
-        latencyMs: Date.now() - started,
-      };
+      if (!res.ok) {
+        const msg = data?.error || `HuggingFace HTTP ${res.status}`;
+        lastError = String(msg);
+        continue;
+      }
+
+      let text = '';
+      if (Array.isArray(data)) {
+        text = data[0]?.generated_text ?? data[0]?.summary_text ?? '';
+      } else if (typeof data?.generated_text === 'string') {
+        text = data.generated_text;
+      } else if (typeof data === 'string') {
+        text = data;
+      } else {
+        text = JSON.stringify(data).slice(0, 2000);
+      }
+
+      if (text) {
+        return {
+          ok: true,
+          text,
+          provider: 'huggingface',
+          model,
+          mode,
+          mock: false,
+          latencyMs: Date.now() - started,
+        };
+      }
+      lastError = 'Respuesta HF vacía';
+    } catch (e: any) {
+      lastError = e?.message || 'Error de red Hugging Face';
     }
-
-    let text = '';
-    if (Array.isArray(data)) {
-      text = data[0]?.generated_text ?? data[0]?.summary_text ?? '';
-    } else if (typeof data?.generated_text === 'string') {
-      text = data.generated_text;
-    } else {
-      text = JSON.stringify(data).slice(0, 2000);
-    }
-
-    return {
-      ok: Boolean(text),
-      text,
-      provider: 'huggingface',
-      model,
-      mode,
-      mock: false,
-      latencyMs: Date.now() - started,
-    };
-  } catch (e: any) {
-    return {
-      ok: false,
-      text: '',
-      provider: 'huggingface',
-      model,
-      mode,
-      mock: false,
-      pending: true,
-      error: e?.message || 'Error de red Hugging Face',
-      latencyMs: Date.now() - started,
-    };
   }
+
+  return {
+    ok: false,
+    text: '',
+    provider: 'huggingface',
+    model,
+    mode,
+    mock: false,
+    pending: true,
+    error: lastError,
+    latencyMs: Date.now() - started,
+  };
 }
 
 export async function complete(req: AiRequest): Promise<AiResponse> {
   const status = getRouterStatus();
-  const chain: ProviderId[] =
-    req.prefer && req.prefer.length > 0 ? req.prefer : status.defaultChain;
+  const prefer = req.prefer && req.prefer.length > 0 ? req.prefer : status.defaultChain;
+  // Never treat mock as a live attempt in the middle of the chain
+  const chain = prefer.filter((id) => id !== 'mock');
 
   const useLive = status.mode !== 'MOCK' || status.forceLive;
 
@@ -375,22 +384,19 @@ export async function complete(req: AiRequest): Promise<AiResponse> {
     return mockComplete(req);
   }
 
-  const errors: string[] = [];
+  const attempts: string[] = [];
 
   for (const id of chain) {
-    if (id === 'mock') {
-      return mockComplete(req);
-    }
     if (id === 'gemini') {
       const r = await callGemini(req);
-      if (r.ok) return r;
-      errors.push(`gemini: ${r.error}`);
+      attempts.push(`gemini:${r.ok ? 'ok' : r.error || 'fail'} (${r.latencyMs}ms)`);
+      if (r.ok) return { ...r, attempts };
       continue;
     }
     if (id === 'huggingface') {
       const r = await callHuggingFace(req);
-      if (r.ok) return r;
-      errors.push(`huggingface: ${r.error}`);
+      attempts.push(`huggingface:${r.ok ? 'ok' : r.error || 'fail'} (${r.latencyMs}ms)`);
+      if (r.ok) return { ...r, attempts };
       continue;
     }
   }
@@ -400,8 +406,9 @@ export async function complete(req: AiRequest): Promise<AiResponse> {
     ...fallback,
     ok: true,
     pending: true,
-    error: `Proveedores live fallaron. Fallback MOCK. ${errors.join(' | ')}`,
-    text: `${fallback.text}\n\n[PENDING live] ${errors.join(' | ')}`,
+    attempts,
+    error: `Proveedores live fallaron. Fallback MOCK. ${attempts.join(' | ')}`,
+    text: `${fallback.text}\n\n[PENDING live] ${attempts.join(' | ')}`,
   };
 }
 
