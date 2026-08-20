@@ -1,34 +1,59 @@
 # ECOM
 
-Plataforma personal de dropshipping automatizado. Este repositorio inicia en modo seguro para desarrollo y depuración.
+Plataforma personal de dropshipping automatizado. Este repositorio comienza en modo seguro para desarrollo y depuración.
 
 ## Modos de ejecución
 
-- `MOCK`: usa datos explícitamente simulados; no llama APIs externas ni publica productos.
-- `SANDBOX`: permite integraciones de pruebas aprobadas.
-- `REAL`: requiere credenciales y validaciones completas; nunca debe activarse por defecto.
+- `MOCK`: datos explícitamente simulados; no llama APIs externas ni publica productos.
+- `SANDBOX`: integraciones de prueba aprobadas.
+- `REAL`: requiere credenciales y validaciones completas; nunca se activa por defecto.
 
-## Requisitos locales
+## Desarrollo en macOS High Sierra
 
-- Docker Desktop y Docker Compose.
-- Node.js 22+ y pnpm 9+ para ejecutar las aplicaciones fuera de contenedores.
+El entorno usa Node 22 y pnpm **dentro de Docker**. No se requiere una instalación local de Node, Corepack o pnpm.
 
-## Arranque de infraestructura local
+### Primer arranque
 
 ```bash
 cp .env.example .env
-docker compose up -d
+docker compose up -d --build
+docker compose run --rm workspace pnpm install
+docker compose run --rm workspace pnpm --filter @ecom/database generate
+docker compose run --rm workspace pnpm --filter @ecom/database migrate --name init
+docker compose --profile app up -d
 ```
 
-Esto levanta PostgreSQL en `localhost:5432` y Redis en `localhost:6379`.
+Servicios:
+
+- Panel: `http://localhost:3000`
+- API: `http://localhost:4000/health`
+- PostgreSQL: `localhost:5432`
+- Redis: `localhost:6379`
+
+### Comandos de desarrollo
+
+```bash
+# Ver estado y logs
+docker compose ps
+docker compose logs -f api
+docker compose logs -f web
+
+# Pruebas, lint y Prisma (siempre dentro de Docker)
+docker compose run --rm workspace pnpm test
+docker compose run --rm workspace pnpm lint
+docker compose run --rm workspace pnpm --filter @ecom/database migrate --name nombre_migracion
+
+# Detener servicios sin borrar datos locales
+docker compose --profile app down
+```
 
 ## Principios de seguridad
 
-- No subir `.env`, tokens, claves, URLs de producción ni secretos.
+- Nunca subir `.env`, tokens, claves, URLs de producción ni secretos.
 - `MOCK`, `SANDBOX` y `REAL` deben mostrarse explícitamente en interfaz y auditoría.
 - Shopify gestiona pagos, reembolsos y métodos de pago; ECOM no procesa dinero.
 - Las operaciones críticas requieren aprobación y registro de auditoría.
 
 ## Estado inicial
 
-El primer commit contiene la infraestructura mínima y el esquema de datos base. Los conectores reales de Shopify, CJdropshipping, IA, almacenamiento, correo y Telegram se habilitarán en commits posteriores con variables de entorno vacías por defecto.
+La base contiene infraestructura local, un esquema de datos base y servicios mínimos. Los conectores reales de Shopify, CJdropshipping, IA, almacenamiento, correo y Telegram se habilitarán después, con variables vacías por defecto.
