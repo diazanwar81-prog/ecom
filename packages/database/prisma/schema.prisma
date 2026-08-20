@@ -39,15 +39,24 @@ enum UserRole {
   READONLY
 }
 
+enum OrderStatus {
+  PENDING
+  PAID
+  FULFILLING
+  FULFILLED
+  CANCELLED
+  REFUNDED
+}
+
 model User {
-  id           String    @id @default(cuid())
-  email        String    @unique
+  id           String     @id @default(cuid())
+  email        String     @unique
   passwordHash String?
   name         String?
-  role         UserRole  @default(ADMIN)
-  mfaEnabled   Boolean   @default(false)
-  createdAt    DateTime  @default(now())
-  updatedAt    DateTime  @updatedAt
+  role         UserRole   @default(ADMIN)
+  mfaEnabled   Boolean    @default(false)
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
   stores       Store[]
   approvals    Approval[]
   audits       AuditLog[]
@@ -64,6 +73,7 @@ model Store {
   ownerId     String
   owner       User        @relation(fields: [ownerId], references: [id])
   products    Product[]
+  orders      Order[]
   createdAt   DateTime    @default(now())
   updatedAt   DateTime    @updatedAt
 }
@@ -152,6 +162,26 @@ model Approval {
   decidedAt   DateTime?
 
   @@index([status, createdAt])
+}
+
+model Order {
+  id              String      @id @default(cuid())
+  storeId         String
+  store           Store       @relation(fields: [storeId], references: [id])
+  externalId      String?
+  orderNumber     String?
+  email           String?
+  status          OrderStatus @default(PENDING)
+  total           Decimal     @db.Decimal(12, 2)
+  currency        String      @default("COP")
+  lineItems       Json?
+  sourceMode      RuntimeMode @default(MOCK)
+  fulfillmentNote String?
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+
+  @@index([storeId, status])
+  @@index([externalId])
 }
 
 model AuditLog {
