@@ -1,7 +1,7 @@
 /**
  * ECOM CJDropshipping adapter
  * - MOCK / SANDBOX / REAL
- * - apiKey → accessToken → createOrder
+ * - auth, createOrder, product list, variants
  */
 
 export type RuntimeMode = 'MOCK' | 'SANDBOX' | 'REAL';
@@ -38,6 +38,22 @@ export interface FulfillResult {
   carrier?: string;
   error?: string;
   raw?: unknown;
+}
+
+export interface CjProductHit {
+  pid: string;
+  productNameEn: string;
+  productSku?: string;
+  sellPriceUsd: number;
+  productImage?: string;
+}
+
+export interface CjVariantHit {
+  vid: string;
+  variantSku: string;
+  variantNameEn?: string;
+  sellPriceUsd: number;
+  weightG?: number;
 }
 
 function env(name: string, fallback = '') {
@@ -79,7 +95,12 @@ export function getCjStatus(): CjStatus {
   };
 }
 
-export async function getCjAccessToken(): Promise<{ ok: boolean; accessToken?: string; error?: string; raw?: unknown }> {
+export async function getCjAccessToken(): Promise<{
+  ok: boolean;
+  accessToken?: string;
+  error?: string;
+  raw?: unknown;
+}> {
   if (!hasKey()) return { ok: false, error: 'CJ_API_KEY vacía' };
 
   if (cachedToken && Date.now() < cachedToken.expiresAt - 60_000) {
@@ -87,11 +108,14 @@ export async function getCjAccessToken(): Promise<{ ok: boolean; accessToken?: s
   }
 
   try {
-    const res = await fetch('https://developers.cjdropshipping.com/api2.0/v1/authentication/getAccessToken', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ apiKey: apiKey() }),
-    });
+    const res = await fetch(
+      'https://developers.cjdropshipping.com/api2.0/v1/authentication/getAccessToken',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ apiKey: apiKey() }),
+      },
+    );
     const data = (await res.json()) as any;
 
     if (!res.ok || data?.result === false || !data?.data?.accessToken) {
@@ -110,6 +134,124 @@ export async function getCjAccessToken(): Promise<{ ok: boolean; accessToken?: s
   }
 }
 
+/** Product list (GET). Optional keyword. */
+export async function searchCjProducts(opts: {
+  keyword?: string;
+  pageNum?: number;
+  pageSize?: number;
+}): Promise<{ ok: boolean; items: CjProductHit[]; error?: string; raw?: unknown }> {
+  const auth = await getCjAccessToken();
+  if (!auth.ok || !auth.accessToken) {
+    return { ok: false, items: [], error: auth.error || 'no token' };
+  }
+
+  const pageNum = opts.pageNum ?? 1;
+  const pageSize = Math.min(opts.pageSize ?? 10, 20);
+  const params = new URLSearchParams({
+    pageNum: String(pageNum),
+    pageSize: String(pageSize),
+  });
+  if (opts.keyword) params.set('productNameEn', opts.keyword);
+
+  try {
+    const res = await fetch(
+      `https://developers.cjdropshipping.com/api2.0/v1/product/list?${params}`,
+      {
+        method: 'GET',
+        headers: { 'CJ-Access-Token': auth.accessToken },
+      },
+    );
+    const data = (await res.json()) as any;
+    if (!res.ok || data?.result === false) {
+      return {
+        ok: false,
+        items: [],
+        error: data?.message || `CJ list HTTP ${res.status}`,
+        raw: data,
+      };
+    }
+
+    const list = data?.data?.list || data?.data || [];
+    const rows = Array.isArray(list) ? list : [];
+    const items: CjProductHit[] = rows.slice(0, pageSize).map((row: any) => ({
+      pid: String(row.pid || row.productId || ''),
+      productNameEn: String(row.productNameEn || row.productName || 'CJ product').slice(0, 160),
+      productSku: row.productSku ? String(row.productSku) : undefined,
+      sellPriceUsd: Number(row.sellPrice || row.nowPrice || 0) || 0,
+      productImage: row.productImage,
+    }));
+
+    return { ok: true, items, raw: { count: items.length } };
+  } catch (e: any) {
+    return { ok: false, items: [], error: e?.message || 'CJ list network error' };
+  }
+}
+
+/** Variants for a product id (GET). */
+export async function getCjVariants(
+  pid: string,
+): Promise<{ ok: boolean; items: CjVariantHit[]; error?: string }> {
+  if (!pid) return { ok: false, items: [], error: 'pid required' };
+  const auth = await getCjAccessToken();
+  if (!auth.ok || !auth.accessToken) {
+    return { ok: false, items: [], error: auth.error || 'no token' };
+  }
+
+  try {
+    const res = await fetch(
+      `https://developers.cjdropshipping.com/api2.0/v1/product/variant/query?pid=${encodeURIComponent(pid)}`,
+      {
+        method: 'GET',
+        headers: { 'CJ-Access-Token': auth.accessToken },
+      },
+    );
+    const data = (await res.json()) as any;
+    if (!res.ok || data?.result === false) {
+      return { ok: false, items: [], error: data?.message || `variant HTTP ${res.status}` };
+    }
+
+    const list = Array.isArray(data?.data) ? data.data : data?.data?.list || [];
+    const items: CjVariantHit[] = list.slice(0, 10).map((row: any) => ({
+      vid: String(row.vid || ''),
+      variantSku: String(row.variantSku || row.sku || ''),
+      variantNameEn: row.variantNameEn || row.variantName,
+      sellPriceUsd: Number(row.variantSellPrice || row.sellPrice || 0) || 0,
+      weightG: row.variantWeight != null ? Number(row.variantWeight) : undefined,
+    }));
+
+    return { ok: true, items: items.filter((v) => v.vid || v.variantSku) };
+  } catch (e: any) {
+    return { ok: false, items: [], error: e?.message || 'variant network error' };
+  }
+}
+
+/** Best effort: first product + first variant for a keyword. */
+export async function matchCjByKeyword(keyword: string): Promise<{
+  ok: boolean;
+  product?: CjProductHit;
+  variant?: CjVariantHit;
+  error?: string;
+}> {
+  const cleaned = keyword
+    .replace(/\[SERPER\]/gi, '')
+    .replace(/[^a-zA-Z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter((w) => w.length > 3)
+    .slice(0, 4)
+    .join(' ');
+  if (!cleaned) return { ok: false, error: 'empty keyword' };
+
+  const found = await searchCjProducts({ keyword: cleaned, pageSize: 5 });
+  if (!found.ok || !found.items.length) {
+    return { ok: false, error: found.error || 'no products' };
+  }
+
+  const product = found.items[0];
+  const vars = await getCjVariants(product.pid);
+  const variant = vars.items[0];
+  return { ok: true, product, variant };
+}
+
 export async function fulfillOrder(input: FulfillInput): Promise<FulfillResult> {
   const status = getCjStatus();
 
@@ -122,7 +264,12 @@ export async function fulfillOrder(input: FulfillInput): Promise<FulfillResult> 
       supplierOrderId,
       trackingNumber,
       carrier: 'MOCK-Logistics',
-      raw: { simulated: true, productTitle: input.productTitle, quantity: input.quantity, orderId: input.orderId },
+      raw: {
+        simulated: true,
+        productTitle: input.productTitle,
+        quantity: input.quantity,
+        orderId: input.orderId,
+      },
     };
   }
 
@@ -181,14 +328,17 @@ export async function fulfillOrder(input: FulfillInput): Promise<FulfillResult> 
       products: [productLine],
     };
 
-    const res = await fetch('https://developers.cjdropshipping.com/api2.0/v1/shopping/order/createOrder', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'CJ-Access-Token': auth.accessToken,
+    const res = await fetch(
+      'https://developers.cjdropshipping.com/api2.0/v1/shopping/order/createOrder',
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'CJ-Access-Token': auth.accessToken,
+        },
+        body: JSON.stringify(body),
       },
-      body: JSON.stringify(body),
-    });
+    );
 
     const data = (await res.json()) as any;
 
