@@ -1,8 +1,8 @@
 /**
- * ECOM Product Discovery (block 10)
- * - MOCK: candidates clearly labeled [MOCK]
- * - Future: Serper / Trends / CJ catalog when keys + permissions allow
- * - Never invents profitability; only proposes candidates for orchestrator
+ * ECOM Product Discovery
+ * - MOCK catalog always available (labeled [MOCK])
+ * - Serper Google Search when SERPER_API_KEY present (free tier only; no auto-paid)
+ * - Never invents profitability; orchestrator evaluates margin later
  */
 
 import { RULES } from '../../rules/src/index';
@@ -24,6 +24,7 @@ export interface DiscoveredCandidate {
   cjVariantId?: string;
   cjSku?: string;
   signals: string[];
+  externalHint?: string;
 }
 
 function env(name: string, fallback = '') {
@@ -36,7 +37,6 @@ function mode(): 'MOCK' | 'SANDBOX' | 'REAL' {
   return 'MOCK';
 }
 
-/** Built-in MOCK catalog — realistic COP prices for CO market */
 const MOCK_POOL: Omit<DiscoveredCandidate, 'sourceMode'>[] = [
   {
     title: '[MOCK] Soporte celular magnético auto',
@@ -116,56 +116,114 @@ const MOCK_POOL: Omit<DiscoveredCandidate, 'sourceMode'>[] = [
 ];
 
 export function getDiscoveryStatus() {
+  const serper = Boolean(env('SERPER_API_KEY'));
   return {
     mode: mode(),
-    block: 10,
+    block: 12,
     sources: {
       mockCatalog: true,
-      serper: Boolean(env('SERPER_API_KEY')),
+      serper,
       cjCatalog: Boolean(env('CJ_API_KEY')),
     },
     minOpportunityScore: RULES.MIN_OPPORTUNITY_SCORE,
-    note: 'V1 usa catálogo MOCK etiquetado. Fuentes reales se activan con API keys y permisos.',
+    note: serper
+      ? 'Serper activo: se mezclan señales de búsqueda con catálogo MOCK. Sin cobros automáticos.'
+      : 'Sin SERPER_API_KEY — solo catálogo MOCK etiquetado.',
   };
 }
 
 export interface DiscoverOptions {
   limit?: number;
   minScore?: number;
-  /** Include low-score candidates for testing filters */
   includeWeak?: boolean;
+  /** Search query for Serper (default trending gadgets Colombia) */
+  query?: string;
 }
 
-/**
- * Discover product candidates.
- * Always labels MOCK items. Does not call paid APIs unless configured later.
- */
+async function fetchSerperHints(query: string): Promise<DiscoveredCandidate[]> {
+  const key = env('SERPER_API_KEY');
+  if (!key) return [];
+
+  try {
+    const res = await fetch('https://google.serper.dev/search', {
+      method: 'POST',
+      headers: {
+        'X-API-KEY': key,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        q: query,
+        gl: 'co',
+        hl: 'es',
+        num: 5,
+      }),
+    });
+    const data = (await res.json()) as any;
+    if (!res.ok) {
+      console.warn('Serper error', data?.message || res.status);
+      return [];
+    }
+
+    const organic = (data.organic || []).slice(0, 5);
+    return organic.map((row: any, i: number) => {
+      const title = String(row.title || `Tendencia ${i + 1}`).slice(0, 120);
+      // Conservative placeholder economics — orchestrator recalculates with real costs later
+      return {
+        title: `[SERPER] ${title}`,
+        source: 'serper',
+        sourceMode: 'SANDBOX' as const,
+        opportunityScore: Math.max(55, 75 - i * 3),
+        confidence: 60,
+        salePrice: 79900,
+        productCost: 28000,
+        shippingCost: 12000,
+        stock: 50,
+        currency: 'COP',
+        countryCode: 'CO',
+        supplierName: 'Pending verification',
+        supplierVerified: false,
+        signals: ['serper_search', 'needs_supplier_verification'],
+        externalHint: row.link,
+      };
+    });
+  } catch (e: any) {
+    console.warn('Serper fetch failed', e?.message);
+    return [];
+  }
+}
+
 export async function discoverCandidates(opts: DiscoverOptions = {}): Promise<{
   mode: string;
   count: number;
   items: DiscoveredCandidate[];
+  serperUsed: boolean;
 }> {
   const limit = Math.min(Math.max(opts.limit ?? 5, 1), 20);
   const minScore = opts.minScore ?? RULES.MIN_OPPORTUNITY_SCORE;
   const m = mode();
 
-  let pool = MOCK_POOL.map((c) => ({ ...c, sourceMode: 'MOCK' as const }));
+  let pool: DiscoveredCandidate[] = MOCK_POOL.map((c) => ({ ...c, sourceMode: 'MOCK' as const }));
 
-  // Optional: if CJ key present, we still do not auto-fetch live catalog in V1
-  // to avoid unexpected network/cost — explicit block later.
+  const query =
+    opts.query ||
+    env('ECOM_DISCOVERY_QUERY', 'productos más vendidos dropshipping Colombia 2026');
+  const serperItems = await fetchSerperHints(query);
+  const serperUsed = serperItems.length > 0;
+  if (serperUsed) {
+    pool = [...serperItems, ...pool];
+  }
 
   if (!opts.includeWeak) {
     pool = pool.filter((c) => c.opportunityScore >= minScore);
   }
 
-  // Prefer verified + higher score
   pool.sort((a, b) => {
     if (a.supplierVerified !== b.supplierVerified) return a.supplierVerified ? -1 : 1;
     return b.opportunityScore - a.opportunityScore;
   });
 
   const items = pool.slice(0, limit);
-  return { mode: m, count: items.length, items };
+  return { mode: m, count: items.length, items, serperUsed };
 }
 
 export function candidatePassesHardFilters(c: DiscoveredCandidate): {
@@ -179,5 +237,6 @@ export function candidatePassesHardFilters(c: DiscoveredCandidate): {
   if (!c.supplierVerified) reasons.push('supplier_unverified');
   if (c.stock <= 0) reasons.push('stock_zero');
   if (c.signals.includes('regulatory_risk')) reasons.push('regulatory_risk');
+  if (c.signals.includes('needs_supplier_verification')) reasons.push('needs_supplier_verification');
   return { ok: reasons.length === 0, reasons };
 }
