@@ -1,8 +1,8 @@
 /**
  * ECOM CJDropshipping adapter
  * - MOCK: simulates supplier order + tracking
- * - SANDBOX/REAL: uses CJ_API_KEY when present and mode allows
- * - Budget: no automatic paid upgrades
+ * - SANDBOX/REAL: apiKey → accessToken → createOrder
+ * Docs: https://developers.cjdropshipping.com/en/api/api2/api/auth.html
  */
 
 export type RuntimeMode = 'MOCK' | 'SANDBOX' | 'REAL';
@@ -25,6 +25,10 @@ export interface FulfillInput {
   shippingCountry?: string;
   shippingZip?: string;
   phone?: string;
+  /** CJ variant id when known */
+  cjVariantId?: string;
+  /** CJ product sku when known */
+  cjSku?: string;
 }
 
 export interface FulfillResult {
@@ -56,6 +60,8 @@ function hasKey() {
   return k.length > 8 && !k.toLowerCase().includes('replace');
 }
 
+let cachedToken: { token: string; expiresAt: number } | null = null;
+
 export function getCjStatus(): CjStatus {
   const m = mode();
   const configured = hasKey();
@@ -67,9 +73,42 @@ export function getCjStatus(): CjStatus {
     configured,
     canFulfillLive,
     note: canFulfillLive
-      ? 'CJ_API_KEY presente — fulfillment puede ser live'
+      ? 'CJ_API_KEY presente — se intercambia por accessToken al cumplir'
       : 'Sin CJ_API_KEY o modo MOCK — fulfillment simulado',
   };
+}
+
+/** POST /authentication/getAccessToken */
+export async function getCjAccessToken(): Promise<{ ok: boolean; accessToken?: string; error?: string; raw?: unknown }> {
+  if (!hasKey()) return { ok: false, error: 'CJ_API_KEY vacía' };
+
+  if (cachedToken && Date.now() < cachedToken.expiresAt - 60_000) {
+    return { ok: true, accessToken: cachedToken.token };
+  }
+
+  try {
+    const res = await fetch('https://developers.cjdropshipping.com/api2.0/v1/authentication/getAccessToken', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ apiKey: apiKey() }),
+    });
+    const data = (await res.json()) as any;
+
+    if (!res.ok || data?.result === false || !data?.data?.accessToken) {
+      return {
+        ok: false,
+        error: data?.message || `CJ auth HTTP ${res.status}`,
+        raw: data,
+      };
+    }
+
+    const accessToken = String(data.data.accessToken);
+    // Cache ~1 day client-side (server token lasts longer; refresh as needed)
+    cachedToken = { token: accessToken, expiresAt: Date.now() + 24 * 60 * 60 * 1000 };
+    return { ok: true, accessToken, raw: data };
+  } catch (e: any) {
+    return { ok: false, error: e?.message || 'Error de red al autenticar CJ' };
+  }
 }
 
 export async function fulfillOrder(input: FulfillInput): Promise<FulfillResult> {
@@ -93,30 +132,53 @@ export async function fulfillOrder(input: FulfillInput): Promise<FulfillResult> 
     };
   }
 
-  // Live path: CJ Open API (structure ready; endpoint may require token exchange)
-  // Docs vary by CJ version — keep call isolated and fail soft
+  const auth = await getCjAccessToken();
+  if (!auth.ok || !auth.accessToken) {
+    return {
+      ok: false,
+      mock: false,
+      supplierOrderId: '',
+      error: auth.error || 'No se pudo obtener CJ accessToken',
+      raw: auth.raw,
+    };
+  }
+
   try {
+    const productLine: Record<string, unknown> = {
+      quantity: input.quantity || 1,
+    };
+    if (input.cjVariantId) productLine.vid = input.cjVariantId;
+    if (input.cjSku) productLine.sku = input.cjSku;
+    if (!input.cjVariantId && !input.cjSku) {
+      // Sin VID/SKU real, createOrder casi siempre falla en CJ;
+      // enviamos productName solo para diagnóstico.
+      productLine.productName = input.productTitle;
+    }
+
+    const body = {
+      orderNumber: input.orderNumber || input.orderId,
+      shippingCustomerName: input.shippingName || 'Customer Test',
+      shippingAddress: input.shippingAddress || 'Calle 1 #1-1',
+      shippingCity: input.shippingCity || 'Bogota',
+      shippingCountry: input.shippingCountry || 'Colombia',
+      shippingCountryCode: input.shippingCountry === 'CO' || !input.shippingCountry ? 'CO' : input.shippingCountry,
+      shippingZip: input.shippingZip || '110111',
+      shippingPhone: input.phone || '3000000000',
+      products: [productLine],
+    };
+
     const res = await fetch('https://developers.cjdropshipping.com/api2.0/v1/shopping/order/createOrder', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'CJ-Access-Token': apiKey(),
+        'CJ-Access-Token': auth.accessToken,
       },
-      body: JSON.stringify({
-        orderNumber: input.orderNumber || input.orderId,
-        products: [{ productName: input.productTitle, quantity: input.quantity }],
-        consignee: input.shippingName || 'Customer',
-        address: input.shippingAddress || '',
-        city: input.shippingCity || '',
-        country: input.shippingCountry || 'CO',
-        zip: input.shippingZip || '',
-        phone: input.phone || '',
-      }),
+      body: JSON.stringify(body),
     });
 
     const data = (await res.json()) as any;
 
-    if (!res.ok || data?.result === false) {
+    if (!res.ok || data?.result === false || (data?.code && data.code !== 200)) {
       return {
         ok: false,
         mock: false,
@@ -126,13 +188,15 @@ export async function fulfillOrder(input: FulfillInput): Promise<FulfillResult> 
       };
     }
 
-    const supplierOrderId = String(data?.data?.orderId || data?.data?.orderNumber || `cj-${Date.now()}`);
+    const supplierOrderId = String(
+      data?.data?.orderId || data?.data?.orderNum || data?.data?.orderNumber || `cj-${Date.now()}`,
+    );
     return {
       ok: true,
       mock: false,
       supplierOrderId,
       trackingNumber: data?.data?.trackingNumber,
-      carrier: data?.data?.logisticName,
+      carrier: data?.data?.logisticName || data?.data?.logisticsName,
       raw: data,
     };
   } catch (e: any) {
