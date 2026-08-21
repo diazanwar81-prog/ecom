@@ -44,6 +44,7 @@ import {
   startWorkers,
   startDiscoveryScheduler,
 } from '../../../packages/queue/src/index';
+import { alertOps, getNotifyStatus, sendTelegram } from '../../../packages/notify/src/index';
 
 const MODE = (process.env.ECOM_MODE ?? 'MOCK') as 'MOCK' | 'SANDBOX' | 'REAL';
 const MODE_ENUM = (MODE === 'REAL' ? 'REAL' : MODE === 'SANDBOX' ? 'SANDBOX' : 'MOCK') as RuntimeMode;
@@ -374,7 +375,7 @@ class HealthController {
       service: 'ecom-api',
       mode: MODE,
       timestamp: new Date().toISOString(),
-      block: 20,
+      block: 22,
       aiRouter: true,
       orchestrator: true,
       agentRuns: true,
@@ -472,6 +473,22 @@ class DiscoveryController {
 
 
 @Controller('jobs')
+
+@Controller('alerts')
+class AlertsController {
+  @Get('status')
+  status() {
+    return { mode: process.env.ECOM_MODE || 'MOCK', ...getNotifyStatus() };
+  }
+
+  @Post('test')
+  async test(@Body() body: { text?: string }) {
+    const text = body?.text || `ECOM test alert ${new Date().toISOString()}`;
+    const r = await sendTelegram(text);
+    return { mode: process.env.ECOM_MODE || 'MOCK', ...r };
+  }
+}
+
 class JobsController {
   @Get()
   async list(@Query('limit') limit = '20') {
@@ -843,7 +860,7 @@ class OrdersController {
 
     if (!result.ok) {
       await writeAudit('FULFILL_FAILED', 'Order', id, result);
-      return { mode: MODE, error: 'fulfill_failed', result };
+      return { mode: MODE, error: 'fulfill_failed' /* telegram via catch below */, result };
     }
 
     const updated = await prisma.order.update({
@@ -1485,6 +1502,7 @@ class AuthController {
     HealthController,
     DiscoveryController,
     JobsController,
+    AlertsController,
     AgentsController,
     AgentRunsController,
     OrchestratorController,
@@ -1553,6 +1571,7 @@ async function bootstrap() {
   }
   try {
     startDiscoveryScheduler();
+  void alertOps('BOOT', { service: 'ecom-api', block: 22 });
   } catch (e: any) {
     console.warn('[queue] scheduler not started:', e?.message);
   }
