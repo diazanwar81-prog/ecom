@@ -6,11 +6,10 @@ import sys
 MAIN = Path(__file__).resolve().parents[1] / "apps/api/src/main.ts"
 t = MAIN.read_text()
 
-if "ECOM_AUTO_FULFILL" in t and "autoFulfill" in t and "block: 17" in t:
+if "ECOM_AUTO_FULFILL" in t and "ORDER_AUTO_FULFILLED" in t and "block: 17" in t:
     print("Already block 17")
     sys.exit(0)
 
-# --- improve fulfill to use line item sku ---
 OLD_FULFILL_CALL = """    const result = await fulfillOrder({
       orderId: order.id,
       orderNumber: order.orderNumber,
@@ -20,23 +19,16 @@ OLD_FULFILL_CALL = """    const result = await fulfillOrder({
     });
 """
 
-NEW_FULFILL_CALL = """    // Prefer SKU from Shopify line item; fallback product lookup by sku
-    let cjSku = first.sku ? String(first.sku) : undefined;
+NEW_FULFILL_CALL = """    let cjSku = first.sku ? String(first.sku) : undefined;
     let cjVariantId: string | undefined;
     if (cjSku) {
       const linked = await prisma.product.findFirst({
-        where: {
-          OR: [
-            { suppliers: { some: { externalSku: cjSku } } },
-            { externalId: { not: null } },
-          ],
-        },
+        where: { suppliers: { some: { cjSku } } },
         include: { suppliers: { orderBy: { isPrimary: 'desc' }, take: 1 } },
       });
-      // soft: also try match title-less via env defaults in fulfillOrder
       const primary = linked?.suppliers?.[0];
-      if (primary?.externalSku) cjSku = primary.externalSku;
-      if ((primary as any)?.externalVariantId) cjVariantId = String((primary as any).externalVariantId);
+      if (primary?.cjSku) cjSku = primary.cjSku;
+      if (primary?.cjVariantId) cjVariantId = primary.cjVariantId;
     }
 
     const result = await fulfillOrder({
@@ -50,13 +42,12 @@ NEW_FULFILL_CALL = """    // Prefer SKU from Shopify line item; fallback product
     });
 """
 
-if OLD_FULFILL_CALL not in t:
-    print("WARN: fulfill call block not exact — skipping SKU enhancement")
-else:
+if OLD_FULFILL_CALL in t:
     t = t.replace(OLD_FULFILL_CALL, NEW_FULFILL_CALL, 1)
     print("Patched fulfill SKU resolution")
+else:
+    print("WARN: fulfill call block not exact — continuing")
 
-# --- auto fulfill after webhook ---
 OLD_WH = """    await writeAudit('ORDER_WEBHOOK', 'Order', order.id, { topic, externalId });
     return { mode: MODE, order, received: true };
 """
@@ -77,12 +68,12 @@ NEW_WH = """    await writeAudit('ORDER_WEBHOOK', 'Order', order.id, { topic, ex
 
       if (cjSku) {
         const linked = await prisma.product.findFirst({
-          where: { suppliers: { some: { externalSku: cjSku } } },
+          where: { suppliers: { some: { cjSku } } },
           include: { suppliers: { orderBy: { isPrimary: 'desc' }, take: 1 } },
         });
         const primary = linked?.suppliers?.[0];
-        if (primary?.externalSku) cjSku = primary.externalSku;
-        if ((primary as any)?.externalVariantId) cjVariantId = String((primary as any).externalVariantId);
+        if (primary?.cjSku) cjSku = primary.cjSku;
+        if (primary?.cjVariantId) cjVariantId = primary.cjVariantId;
       }
 
       const result = await fulfillOrder({
@@ -148,5 +139,5 @@ t = t.replace("ECOM API block-16 (ai-copy)", "ECOM API block-17 (auto-fulfill)",
 
 MAIN.write_text(t)
 print("Patched block 17 auto-fulfill")
-print("  autoFulfill:", "autoFulfill" in t)
+print("  ORDER_AUTO_FULFILLED:", "ORDER_AUTO_FULFILLED" in t)
 print("  block 17:", "block: 17" in t)
