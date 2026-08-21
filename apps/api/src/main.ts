@@ -39,6 +39,7 @@ import {
   listRecentJobs,
   getQueueStatus,
   startWorkers,
+  startDiscoveryScheduler,
 } from '../../../packages/queue/src/index';
 
 const MODE = (process.env.ECOM_MODE ?? 'MOCK') as 'MOCK' | 'SANDBOX' | 'REAL';
@@ -370,7 +371,7 @@ class HealthController {
       service: 'ecom-api',
       mode: MODE,
       timestamp: new Date().toISOString(),
-      block: 11,
+      block: 13,
       aiRouter: true,
       orchestrator: true,
       agentRuns: true,
@@ -1142,10 +1143,15 @@ async function bootstrap() {
   } catch (e: any) {
     console.warn('[queue] workers not started:', e?.message);
   }
+  try {
+    startDiscoveryScheduler();
+  } catch (e: any) {
+    console.warn('[queue] scheduler not started:', e?.message);
+  }
   const app = await NestFactory.create(AppModule);
   app.enableCors({ origin: process.env.APP_URL ?? 'http://localhost:3000' });
   await app.listen(Number(process.env.API_PORT ?? 4000));
-  console.log(`ECOM API block-11 (queue) on ${process.env.API_PORT ?? 4000} mode=${MODE}`);
+  console.log(`ECOM API block-13 (scheduler) on ${process.env.API_PORT ?? 4000} mode=${MODE}`);
 }
 
 void bootstrap();
