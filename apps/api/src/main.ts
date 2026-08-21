@@ -18,6 +18,7 @@ import {
   getShopifyStatus,
   publishProduct,
   createMockOrder,
+  createOrderFulfillment,
 } from '../../../packages/shopify/src/index';
 import { getCjStatus, fulfillOrder } from '../../../packages/cj/src/index';
 import {
@@ -371,7 +372,7 @@ class HealthController {
       service: 'ecom-api',
       mode: MODE,
       timestamp: new Date().toISOString(),
-      block: 17,
+      block: 18,
       aiRouter: true,
       orchestrator: true,
       agentRuns: true,
@@ -861,6 +862,74 @@ class OrdersController {
       note: result.mock ? 'Fulfillment MOCK' : 'Fulfillment enviado a CJ',
     };
   }
+
+  /** Block 18: push tracking / mark fulfilled on Shopify */
+  @Post(':id/sync-tracking')
+  async syncTracking(
+    @Param('id') id: string,
+    @Body() body: { trackingNumber?: string; trackingCompany?: string; notifyCustomer?: boolean },
+  ) {
+    const order = await prisma.order.findUnique({ where: { id } });
+    if (!order) return { error: 'not_found' };
+    if (!order.externalId || String(order.externalId).startsWith('mock') || String(order.externalId).startsWith('900')) {
+      // still try if looks numeric shopify id
+    }
+    const shopifyOrderId = String(order.externalId || '');
+    if (!/^\d+$/.test(shopifyOrderId)) {
+      return {
+        error: 'no_shopify_order_id',
+        reason: 'externalId no es un order id numérico de Shopify (pedido de prueba manual?)',
+        externalId: order.externalId,
+      };
+    }
+
+    // Prefer body tracking; else parse from fulfillmentNote "tracking X" or "CJ LIVE · id · tracking Y"
+    let trackingNumber = body?.trackingNumber;
+    let trackingCompany = body?.trackingCompany || 'CJPacket Ordinary';
+    if (!trackingNumber && order.fulfillmentNote) {
+      const m = String(order.fulfillmentNote).match(/tracking\s+([^·\s]+)/i);
+      if (m && m[1] && m[1] !== 'n/a') trackingNumber = m[1];
+    }
+    // placeholder if CJ has not issued tracking yet
+    if (!trackingNumber) {
+      trackingNumber = `PENDING-${order.orderNumber || order.id.slice(-6)}`;
+    }
+
+    const result = await createOrderFulfillment({
+      orderId: shopifyOrderId,
+      trackingNumber,
+      trackingCompany,
+      notifyCustomer: body?.notifyCustomer !== false,
+    });
+
+    if (!result.ok) {
+      await writeAudit('SHOPIFY_FULFILL_FAILED', 'Order', id, result);
+      return { mode: MODE, error: 'shopify_fulfill_failed', result };
+    }
+
+    const note = `Shopify fulfill ${result.mock ? 'MOCK' : 'LIVE'} · ff=${result.fulfillmentId || 'n/a'} · track=${trackingNumber}`;
+    const updated = await prisma.order.update({
+      where: { id },
+      data: {
+        status: 'FULFILLED',
+        fulfillmentNote: order.fulfillmentNote
+          ? `${order.fulfillmentNote} · ${note}`
+          : note,
+      },
+    });
+    await writeAudit('SHOPIFY_FULFILL_SYNC', 'Order', id, result);
+    return {
+      mode: MODE,
+      synced: true,
+      mock: result.mock,
+      trackingNumber,
+      trackingCompany,
+      order: updated,
+      shopify: result,
+    };
+  }
+
+
 }
 
 @Controller('ai')
@@ -1385,7 +1454,7 @@ async function bootstrap() {
   const app = await NestFactory.create(AppModule);
   app.enableCors({ origin: process.env.APP_URL ?? 'http://localhost:3000' });
   await app.listen(Number(process.env.API_PORT ?? 4000));
-  console.log(`ECOM API block-17 (auto-fulfill) on ${process.env.API_PORT ?? 4000} mode=${MODE}`);
+  console.log(`ECOM API block-18 (tracking) on ${process.env.API_PORT ?? 4000} mode=${MODE}`);
 }
 
 void bootstrap();
