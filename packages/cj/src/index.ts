@@ -1,7 +1,7 @@
 /**
  * ECOM CJDropshipping adapter
- * - MOCK: simulates supplier order + tracking
- * - SANDBOX/REAL: apiKey → accessToken → createOrder
+ * - MOCK / SANDBOX / REAL
+ * - apiKey → accessToken → createOrder
  */
 
 export type RuntimeMode = 'MOCK' | 'SANDBOX' | 'REAL';
@@ -11,6 +11,7 @@ export interface CjStatus {
   configured: boolean;
   canFulfillLive: boolean;
   note: string;
+  defaultVid?: string;
 }
 
 export interface FulfillInput {
@@ -65,13 +66,15 @@ export function getCjStatus(): CjStatus {
   const configured = hasKey();
   const forceLive = env('ECOM_CJ_FORCE_LIVE').toLowerCase() === 'true';
   const canFulfillLive = configured && (m !== 'MOCK' || forceLive);
+  const defaultVid = env('CJ_DEFAULT_VID') || undefined;
 
   return {
     mode: m,
     configured,
     canFulfillLive,
+    defaultVid,
     note: canFulfillLive
-      ? 'CJ_API_KEY presente — se intercambia por accessToken al cumplir'
+      ? `CJ listo · defaultVid=${defaultVid || 'ninguno'}`
       : 'Sin CJ_API_KEY o modo MOCK — fulfillment simulado',
   };
 }
@@ -119,12 +122,7 @@ export async function fulfillOrder(input: FulfillInput): Promise<FulfillResult> 
       supplierOrderId,
       trackingNumber,
       carrier: 'MOCK-Logistics',
-      raw: {
-        simulated: true,
-        productTitle: input.productTitle,
-        quantity: input.quantity,
-        orderId: input.orderId,
-      },
+      raw: { simulated: true, productTitle: input.productTitle, quantity: input.quantity, orderId: input.orderId },
     };
   }
 
@@ -139,15 +137,24 @@ export async function fulfillOrder(input: FulfillInput): Promise<FulfillResult> 
     };
   }
 
+  const vid = input.cjVariantId || env('CJ_DEFAULT_VID');
+  const sku = input.cjSku || env('CJ_DEFAULT_SKU');
+
+  if (!vid && !sku) {
+    return {
+      ok: false,
+      mock: false,
+      supplierOrderId: '',
+      error: 'Falta vid/variantSku. Define CJ_DEFAULT_VID o vincula el producto a un variant CJ.',
+    };
+  }
+
   try {
     const productLine: Record<string, unknown> = {
       quantity: input.quantity || 1,
     };
-    if (input.cjVariantId) productLine.vid = input.cjVariantId;
-    if (input.cjSku) productLine.sku = input.cjSku;
-    if (!input.cjVariantId && !input.cjSku) {
-      productLine.productName = input.productTitle;
-    }
+    if (vid) productLine.vid = vid;
+    if (sku) productLine.variantSku = sku;
 
     const fromCountryCode = env('CJ_FROM_COUNTRY', 'CN');
     const toCountryCode =
@@ -157,9 +164,7 @@ export async function fulfillOrder(input: FulfillInput): Promise<FulfillResult> 
           ? input.shippingCountry.toUpperCase()
           : 'CO';
 
-    // Nombre de logística debe coincidir con opciones CJ (freightCalculate / plantilla)
-    const logisticName =
-      input.logisticName || env('CJ_LOGISTIC_NAME', 'CJPacket Ordinary');
+    const logisticName = input.logisticName || env('CJ_LOGISTIC_NAME', 'CJPacket Ordinary');
 
     const body: Record<string, unknown> = {
       orderNumber: input.orderNumber || input.orderId,
