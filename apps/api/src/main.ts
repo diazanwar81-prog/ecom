@@ -371,7 +371,7 @@ class HealthController {
       service: 'ecom-api',
       mode: MODE,
       timestamp: new Date().toISOString(),
-      block: 13,
+      block: 15,
       aiRouter: true,
       orchestrator: true,
       agentRuns: true,
@@ -964,7 +964,7 @@ class ProductsController {
       description: enriched.description,
       price: enriched.salePrice,
       currency: enriched.currency,
-      sku: `ECOM-${id.slice(-8)}`,
+      sku: enriched.cjSku || `ECOM-${id.slice(-8)}`,
       inventory: enriched.stock,
     });
     if (!result.ok) {
@@ -983,6 +983,98 @@ class ProductsController {
     });
     await writeAudit('PRODUCT_PUBLISHED', 'Product', id, result);
     return { mode: MODE, published: true, mock: result.mock, product: updated, shopify: result };
+  }
+
+
+  /** Block 15: human OK + publish Shopify in one step (CJ links preserved on product). */
+  @Post(':id/go-live')
+  async goLive(@Param('id') id: string, @Body() body: { note?: string }) {
+    const p = await prisma.product.findUnique({
+      where: { id },
+      include: { suppliers: { include: { supplier: true }, orderBy: { isPrimary: 'desc' } } },
+    });
+    if (!p) return { error: 'not_found' };
+    const enriched = enrichProduct(p);
+    if (enriched.shouldPause || !enriched.canPublish) {
+      return { error: 'rules_block', reason: 'Margen/stock no permiten publicación', item: enriched };
+    }
+
+    const admin = await prisma.user.findFirst({ where: { email: 'admin@ecom.local' } });
+    let approval = await prisma.approval.findFirst({
+      where: { productId: id, status: 'APPROVED' },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    if (!approval) {
+      const pending = await prisma.approval.findFirst({
+        where: { productId: id, status: 'PENDING' },
+        orderBy: { createdAt: 'desc' },
+      });
+      if (pending) {
+        approval = await prisma.approval.update({
+          where: { id: pending.id },
+          data: {
+            status: 'APPROVED',
+            decidedAt: new Date(),
+            metadata: { ...(pending.metadata as object), note: body?.note || 'go-live', via: 'go-live' },
+          },
+        });
+      } else {
+        approval = await prisma.approval.create({
+          data: {
+            productId: id,
+            requestedBy: admin?.id ?? 'system',
+            action: 'FIRST_PUBLICATION',
+            reason: body?.note || 'Go-live: aprobación + publicación',
+            status: 'APPROVED',
+            decidedAt: new Date(),
+            metadata: { via: 'go-live', requiresHuman: true },
+          },
+        });
+      }
+      await writeAudit('APPROVAL_APPROVED', 'Approval', approval.id, { via: 'go-live' });
+    }
+
+    const sku = enriched.cjSku || `ECOM-${id.slice(-8)}`;
+    const result = await publishProduct({
+      title: enriched.title,
+      description: enriched.description,
+      price: enriched.salePrice,
+      currency: enriched.currency,
+      sku,
+      inventory: enriched.stock,
+    });
+    if (!result.ok) {
+      await writeAudit('GO_LIVE_FAILED', 'Product', id, result);
+      return { mode: MODE, error: 'publish_failed', approval, result };
+    }
+
+    const updated = await prisma.product.update({
+      where: { id },
+      data: {
+        status: 'PUBLISHED',
+        externalId: result.externalId,
+        isFirstPublication: false,
+        sourceMode: result.mock ? 'MOCK' : MODE_ENUM,
+      },
+    });
+    await writeAudit('PRODUCT_GO_LIVE', 'Product', id, {
+      shopify: result.externalId,
+      cjVariantId: enriched.cjVariantId,
+      cjSku: enriched.cjSku,
+      mock: result.mock,
+    });
+
+    return {
+      mode: MODE,
+      published: true,
+      mock: result.mock,
+      product: updated,
+      approval,
+      shopify: result,
+      cj: { variantId: enriched.cjVariantId, sku: enriched.cjSku },
+      note: 'Publicado tras aprobación humana (go-live). Vínculo CJ conservado en ProductSupplier.',
+    };
   }
 
   @Post(':id/generate-copy')
@@ -1151,7 +1243,7 @@ async function bootstrap() {
   const app = await NestFactory.create(AppModule);
   app.enableCors({ origin: process.env.APP_URL ?? 'http://localhost:3000' });
   await app.listen(Number(process.env.API_PORT ?? 4000));
-  console.log(`ECOM API block-13 (scheduler) on ${process.env.API_PORT ?? 4000} mode=${MODE}`);
+  console.log(`ECOM API block-15 (go-live) on ${process.env.API_PORT ?? 4000} mode=${MODE}`);
 }
 
 void bootstrap();

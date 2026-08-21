@@ -172,6 +172,20 @@ export default function Home() {
     await load();
   }
 
+  
+  async function goLive(id: string) {
+    setMessage(null);
+    const res = await fetch(`${API}/products/${id}/go-live`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ note: 'Aprobado y publicado desde panel' }),
+    });
+    const data = await res.json();
+    if (data.error) setMessage(`Go-live: ${data.error} ${data.reason || ''}`);
+    else setMessage(`Go-live OK · shopify=${data.shopify?.externalId} · mock=${data.mock}`);
+    await load();
+  }
+
   async function publish(id: string) {
     setMessage(null);
     const res = await fetch(`${API}/products/${id}/publish`, { method: 'POST' });
@@ -283,7 +297,8 @@ export default function Home() {
                 <button type="button" onClick={() => runPipeline(p.id)} style={{ cursor: 'pointer' }}>Pipeline</button>
                 <button type="button" onClick={() => requestApproval(p.id)} style={{ cursor: 'pointer' }}>Pedir aprobación</button>
                 <button type="button" onClick={() => generateCopy(p.id)} style={{ cursor: 'pointer' }}>Copy IA</button>
-                <button type="button" onClick={() => publish(p.id)} style={{ cursor: 'pointer' }}>Publicar</button>
+                <button type="button" onClick={() => goLive(p.id)} style={{ cursor: 'pointer', background: '#16a34a', color: '#fff', border: 'none', padding: '4px 10px', borderRadius: 4 }}>Aprobar y publicar</button>
+                <button type="button" onClick={() => publish(p.id) style={{ cursor: 'pointer' }}>Publicar</button>
               </div>
             </article>
           ))}
