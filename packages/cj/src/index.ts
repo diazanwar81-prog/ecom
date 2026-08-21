@@ -25,9 +25,7 @@ export interface FulfillInput {
   shippingCountry?: string;
   shippingZip?: string;
   phone?: string;
-  /** CJ variant id when known */
   cjVariantId?: string;
-  /** CJ product sku when known */
   cjSku?: string;
 }
 
@@ -78,7 +76,6 @@ export function getCjStatus(): CjStatus {
   };
 }
 
-/** POST /authentication/getAccessToken */
 export async function getCjAccessToken(): Promise<{ ok: boolean; accessToken?: string; error?: string; raw?: unknown }> {
   if (!hasKey()) return { ok: false, error: 'CJ_API_KEY vacía' };
 
@@ -103,7 +100,6 @@ export async function getCjAccessToken(): Promise<{ ok: boolean; accessToken?: s
     }
 
     const accessToken = String(data.data.accessToken);
-    // Cache ~1 day client-side (server token lasts longer; refresh as needed)
     cachedToken = { token: accessToken, expiresAt: Date.now() + 24 * 60 * 60 * 1000 };
     return { ok: true, accessToken, raw: data };
   } catch (e: any) {
@@ -150,18 +146,27 @@ export async function fulfillOrder(input: FulfillInput): Promise<FulfillResult> 
     if (input.cjVariantId) productLine.vid = input.cjVariantId;
     if (input.cjSku) productLine.sku = input.cjSku;
     if (!input.cjVariantId && !input.cjSku) {
-      // Sin VID/SKU real, createOrder casi siempre falla en CJ;
-      // enviamos productName solo para diagnóstico.
       productLine.productName = input.productTitle;
     }
 
-    const body = {
+    // CJ createOrder requires origin + destination country codes
+    const fromCountryCode = env('CJ_FROM_COUNTRY', 'CN');
+    const toCountryCode =
+      !input.shippingCountry || input.shippingCountry === 'CO' || input.shippingCountry === 'Colombia'
+        ? 'CO'
+        : input.shippingCountry.length === 2
+          ? input.shippingCountry.toUpperCase()
+          : 'CO';
+
+    const body: Record<string, unknown> = {
       orderNumber: input.orderNumber || input.orderId,
+      fromCountryCode,
+      shippingCountryCode: toCountryCode,
       shippingCustomerName: input.shippingName || 'Customer Test',
       shippingAddress: input.shippingAddress || 'Calle 1 #1-1',
       shippingCity: input.shippingCity || 'Bogota',
+      shippingProvince: input.shippingCity || 'Bogota',
       shippingCountry: input.shippingCountry || 'Colombia',
-      shippingCountryCode: input.shippingCountry === 'CO' || !input.shippingCountry ? 'CO' : input.shippingCountry,
       shippingZip: input.shippingZip || '110111',
       shippingPhone: input.phone || '3000000000',
       products: [productLine],
