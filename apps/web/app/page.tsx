@@ -152,14 +152,19 @@ export default function Home() {
 
   async function runDiscovery() {
     setMessage(null);
-    const res = await fetch(`${API}/discovery/run`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ limit: 3, runPipeline: true, onlyPassingFilters: true }),
-    });
-    const data = await res.json();
-    setMessage(`Discovery: creados ${data.created}, skipped ${data.skipped}, rejected ${data.rejectedFilter}`);
-    await load();
+    try {
+      const res = await fetch(`${API}/jobs/discovery`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ limit: 2, runPipeline: true, onlyPassingFilters: true }),
+      });
+      const data = await res.json();
+      if (data.error) setMessage(`Discovery: ${data.error}`);
+      else setMessage(`Discovery encolado job=${data.jobId || 'ok'}`);
+      await load();
+    } catch (e: any) {
+      setMessage(`Discovery falló: ${e?.message || 'Failed to fetch'}`);
+    }
   }
 
   async function enqueueDiscovery() {
