@@ -489,6 +489,7 @@ class AlertsController {
   }
 }
 
+@Controller('jobs')
 class JobsController {
   @Get()
   async list(@Query('limit') limit = '20') {
