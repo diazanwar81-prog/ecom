@@ -371,7 +371,7 @@ class HealthController {
       service: 'ecom-api',
       mode: MODE,
       timestamp: new Date().toISOString(),
-      block: 15,
+      block: 16,
       aiRouter: true,
       orchestrator: true,
       agentRuns: true,
@@ -807,6 +807,15 @@ class AiController {
 }
 
 @Controller('products')
+
+function cleanProductTitle(raw: string): string {
+  return String(raw || '')
+    .replace(/\[(?:MOCK|SERPER\+CJ|SERPER|CJ)\]\s*/gi, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 120) || 'Producto ECOM';
+}
+
 class ProductsController {
   constructor(private readonly rules: RulesService) {}
 
@@ -988,7 +997,7 @@ class ProductsController {
 
   /** Block 15: human OK + publish Shopify in one step (CJ links preserved on product). */
   @Post(':id/go-live')
-  async goLive(@Param('id') id: string, @Body() body: { note?: string }) {
+  async goLive(@Param('id') id: string, @Body() body: { note?: string; skipAiCopy?: boolean }) {
     const p = await prisma.product.findUnique({
       where: { id },
       include: { suppliers: { include: { supplier: true }, orderBy: { isPrimary: 'desc' } } },
@@ -1035,10 +1044,52 @@ class ProductsController {
       await writeAudit('APPROVAL_APPROVED', 'Approval', approval.id, { via: 'go-live' });
     }
 
+    // Block 16: clean title + optional AI copy (skip with body.skipAiCopy=true)
+    const skipAi = Boolean((body as any)?.skipAiCopy);
+    let liveTitle = cleanProductTitle(enriched.title);
+    let liveDescription = enriched.description || '';
+    let copyMeta: Record<string, unknown> = { skipped: skipAi };
+
+    if (!skipAi) {
+      try {
+        const copy = await generateProductCopy({
+          title: liveTitle,
+          facts: `precio ${enriched.salePrice} ${enriched.currency}, costo ${enriched.productCost}, stock ${enriched.stock}, proveedor CJ, sku ${enriched.cjSku || 'n/a'}`,
+          language: 'es-CO',
+        });
+        copyMeta = {
+          ok: copy.ok,
+          provider: copy.provider,
+          model: copy.model,
+          mock: copy.mock,
+        };
+        if (copy.ok && copy.text) {
+          liveDescription = copy.text.slice(0, 4000);
+          // First non-empty line as optional short title if original was noisy
+          const firstLine = liveDescription.split('\n').map((s) => s.trim()).find(Boolean);
+          if (firstLine && firstLine.length >= 12 && firstLine.length <= 90 && /\[/.test(enriched.title)) {
+            liveTitle = firstLine.replace(/^#+\s*/, '').slice(0, 120);
+          }
+        }
+      } catch (e: any) {
+        copyMeta = { ok: false, error: e?.message || 'copy_failed' };
+      }
+    }
+
+    if (liveDescription || liveTitle !== enriched.title) {
+      await prisma.product.update({
+        where: { id },
+        data: {
+          title: liveTitle,
+          description: liveDescription || null,
+        },
+      });
+    }
+
     const sku = enriched.cjSku || `ECOM-${id.slice(-8)}`;
     const result = await publishProduct({
-      title: enriched.title,
-      description: enriched.description,
+      title: liveTitle,
+      description: liveDescription || liveTitle,
       price: enriched.salePrice,
       currency: enriched.currency,
       sku,
@@ -1046,7 +1097,7 @@ class ProductsController {
     });
     if (!result.ok) {
       await writeAudit('GO_LIVE_FAILED', 'Product', id, result);
-      return { mode: MODE, error: 'publish_failed', approval, result };
+      return { mode: MODE, error: 'publish_failed', approval, result, copy: copyMeta };
     }
 
     const updated = await prisma.product.update({
@@ -1056,6 +1107,8 @@ class ProductsController {
         externalId: result.externalId,
         isFirstPublication: false,
         sourceMode: result.mock ? 'MOCK' : MODE_ENUM,
+        title: liveTitle,
+        description: liveDescription || null,
       },
     });
     await writeAudit('PRODUCT_GO_LIVE', 'Product', id, {
@@ -1063,6 +1116,8 @@ class ProductsController {
       cjVariantId: enriched.cjVariantId,
       cjSku: enriched.cjSku,
       mock: result.mock,
+      copy: copyMeta,
+      title: liveTitle,
     });
 
     return {
@@ -1072,8 +1127,9 @@ class ProductsController {
       product: updated,
       approval,
       shopify: result,
+      copy: copyMeta,
       cj: { variantId: enriched.cjVariantId, sku: enriched.cjSku },
-      note: 'Publicado tras aprobación humana (go-live). Vínculo CJ conservado en ProductSupplier.',
+      note: 'Go-live con copy IA (bloque 16). Título limpio + descripción es-CO. CJ conservado.',
     };
   }
 
@@ -1243,7 +1299,7 @@ async function bootstrap() {
   const app = await NestFactory.create(AppModule);
   app.enableCors({ origin: process.env.APP_URL ?? 'http://localhost:3000' });
   await app.listen(Number(process.env.API_PORT ?? 4000));
-  console.log(`ECOM API block-15 (go-live) on ${process.env.API_PORT ?? 4000} mode=${MODE}`);
+  console.log(`ECOM API block-16 (ai-copy) on ${process.env.API_PORT ?? 4000} mode=${MODE}`);
 }
 
 void bootstrap();
