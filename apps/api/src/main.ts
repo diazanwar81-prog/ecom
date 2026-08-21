@@ -371,7 +371,7 @@ class HealthController {
       service: 'ecom-api',
       mode: MODE,
       timestamp: new Date().toISOString(),
-      block: 16,
+      block: 17,
       aiRouter: true,
       orchestrator: true,
       agentRuns: true,
@@ -714,7 +714,80 @@ class ShopifyController {
     });
 
     await writeAudit('ORDER_WEBHOOK', 'Order', order.id, { topic, externalId });
-    return { mode: MODE, order, received: true };
+
+    // Block 17: auto-fulfill (disable with ECOM_AUTO_FULFILL=false)
+    const autoFulfill = (process.env.ECOM_AUTO_FULFILL || 'true').toLowerCase() !== 'false';
+    if (!autoFulfill) {
+      return { mode: MODE, order, received: true, autoFulfill: false };
+    }
+
+    try {
+      const items = (order.lineItems as any[]) || [];
+      const first = items[0] || { title: 'Producto', quantity: 1, sku: undefined };
+      let cjSku = first.sku ? String(first.sku) : undefined;
+      let cjVariantId: string | undefined;
+
+      if (cjSku) {
+        const linked = await prisma.product.findFirst({
+          where: { suppliers: { some: { cjSku } } },
+          include: { suppliers: { orderBy: { isPrimary: 'desc' }, take: 1 } },
+        });
+        const primary = linked?.suppliers?.[0];
+        if (primary?.cjSku) cjSku = primary.cjSku;
+        if (primary?.cjVariantId) cjVariantId = primary.cjVariantId;
+      }
+
+      const result = await fulfillOrder({
+        orderId: order.id,
+        orderNumber: order.orderNumber,
+        productTitle: first.title || 'Producto',
+        quantity: first.quantity || 1,
+        shippingCountry: 'CO',
+        cjSku,
+        cjVariantId,
+      });
+
+      if (!result.ok) {
+        await writeAudit('AUTO_FULFILL_FAILED', 'Order', order.id, result);
+        return {
+          mode: MODE,
+          order,
+          received: true,
+          autoFulfill: true,
+          fulfilled: false,
+          error: result.error,
+          cj: result,
+        };
+      }
+
+      const updated = await prisma.order.update({
+        where: { id: order.id },
+        data: {
+          status: 'FULFILLED',
+          fulfillmentNote: `CJ ${result.mock ? 'MOCK' : 'LIVE'} · auto · ${result.supplierOrderId} · ${result.carrier || ''}`,
+        },
+      });
+      await writeAudit('ORDER_AUTO_FULFILLED', 'Order', order.id, result);
+      return {
+        mode: MODE,
+        order: updated,
+        received: true,
+        autoFulfill: true,
+        fulfilled: true,
+        mock: result.mock,
+        cj: result,
+      };
+    } catch (e: any) {
+      await writeAudit('AUTO_FULFILL_ERROR', 'Order', order.id, { error: e?.message });
+      return {
+        mode: MODE,
+        order,
+        received: true,
+        autoFulfill: true,
+        fulfilled: false,
+        error: e?.message || 'auto_fulfill_error',
+      };
+    }
   }
 }
 
@@ -743,12 +816,26 @@ class OrdersController {
     const items = (order.lineItems as any[]) || [];
     const first = items[0] || { title: 'Producto', quantity: 1 };
 
+    let cjSku = first.sku ? String(first.sku) : undefined;
+    let cjVariantId: string | undefined;
+    if (cjSku) {
+      const linked = await prisma.product.findFirst({
+        where: { suppliers: { some: { cjSku } } },
+        include: { suppliers: { orderBy: { isPrimary: 'desc' }, take: 1 } },
+      });
+      const primary = linked?.suppliers?.[0];
+      if (primary?.cjSku) cjSku = primary.cjSku;
+      if (primary?.cjVariantId) cjVariantId = primary.cjVariantId;
+    }
+
     const result = await fulfillOrder({
       orderId: order.id,
       orderNumber: order.orderNumber,
       productTitle: first.title || 'Producto',
       quantity: first.quantity || 1,
       shippingCountry: 'CO',
+      cjSku: cjSku || undefined,
+      cjVariantId: cjVariantId || undefined,
     });
 
     if (!result.ok) {
@@ -1298,7 +1385,7 @@ async function bootstrap() {
   const app = await NestFactory.create(AppModule);
   app.enableCors({ origin: process.env.APP_URL ?? 'http://localhost:3000' });
   await app.listen(Number(process.env.API_PORT ?? 4000));
-  console.log(`ECOM API block-16 (ai-copy) on ${process.env.API_PORT ?? 4000} mode=${MODE}`);
+  console.log(`ECOM API block-17 (auto-fulfill) on ${process.env.API_PORT ?? 4000} mode=${MODE}`);
 }
 
 void bootstrap();
