@@ -2,7 +2,6 @@
  * ECOM CJDropshipping adapter
  * - MOCK: simulates supplier order + tracking
  * - SANDBOX/REAL: apiKey → accessToken → createOrder
- * Docs: https://developers.cjdropshipping.com/en/api/api2/api/auth.html
  */
 
 export type RuntimeMode = 'MOCK' | 'SANDBOX' | 'REAL';
@@ -27,6 +26,7 @@ export interface FulfillInput {
   phone?: string;
   cjVariantId?: string;
   cjSku?: string;
+  logisticName?: string;
 }
 
 export interface FulfillResult {
@@ -149,7 +149,6 @@ export async function fulfillOrder(input: FulfillInput): Promise<FulfillResult> 
       productLine.productName = input.productTitle;
     }
 
-    // CJ createOrder requires origin + destination country codes
     const fromCountryCode = env('CJ_FROM_COUNTRY', 'CN');
     const toCountryCode =
       !input.shippingCountry || input.shippingCountry === 'CO' || input.shippingCountry === 'Colombia'
@@ -158,9 +157,14 @@ export async function fulfillOrder(input: FulfillInput): Promise<FulfillResult> 
           ? input.shippingCountry.toUpperCase()
           : 'CO';
 
+    // Nombre de logística debe coincidir con opciones CJ (freightCalculate / plantilla)
+    const logisticName =
+      input.logisticName || env('CJ_LOGISTIC_NAME', 'CJPacket Ordinary');
+
     const body: Record<string, unknown> = {
       orderNumber: input.orderNumber || input.orderId,
       fromCountryCode,
+      logisticName,
       shippingCountryCode: toCountryCode,
       shippingCustomerName: input.shippingName || 'Customer Test',
       shippingAddress: input.shippingAddress || 'Calle 1 #1-1',
@@ -201,7 +205,7 @@ export async function fulfillOrder(input: FulfillInput): Promise<FulfillResult> 
       mock: false,
       supplierOrderId,
       trackingNumber: data?.data?.trackingNumber,
-      carrier: data?.data?.logisticName || data?.data?.logisticsName,
+      carrier: data?.data?.logisticName || data?.data?.logisticsName || logisticName,
       raw: data,
     };
   } catch (e: any) {
