@@ -26,6 +26,12 @@ import {
   type CandidateInput,
   type PipelineResult,
 } from '../../../packages/orchestrator/src/index';
+import {
+  discoverCandidates,
+  candidatePassesHardFilters,
+  getDiscoveryStatus,
+  type DiscoveredCandidate,
+} from '../../../packages/discovery/src/index';
 import { prisma, ProductStatus, ApprovalStatus, RuntimeMode } from '../../../packages/database/src/index';
 
 const MODE = (process.env.ECOM_MODE ?? 'MOCK') as 'MOCK' | 'SANDBOX' | 'REAL';
@@ -66,6 +72,95 @@ async function saveAgentRun(result: PipelineResult, opts?: { productId?: string;
     console.warn('saveAgentRun failed', e?.message);
     return null;
   }
+}
+
+async function ensureSupplierByName(name: string, verified: boolean) {
+  const existing = await prisma.supplier.findFirst({ where: { name } });
+  if (existing) return existing;
+  return prisma.supplier.create({ data: { name, verified } });
+}
+
+async function ingestCandidate(storeId: string, c: DiscoveredCandidate, runPipeline: boolean) {
+  const existing = await prisma.product.findFirst({
+    where: { storeId, title: c.title },
+  });
+  if (existing) {
+    return { productId: existing.id, created: false, pipeline: null as any, skipped: true };
+  }
+
+  const supplier = await ensureSupplierByName(c.supplierName, c.supplierVerified);
+  const margin = calculateMargin({
+    salePrice: c.salePrice,
+    costs: { productCost: c.productCost, shippingCost: c.shippingCost },
+  });
+
+  const product = await prisma.product.create({
+    data: {
+      storeId,
+      title: c.title,
+      status: 'DETECTED',
+      opportunityScore: c.opportunityScore,
+      confidence: c.confidence,
+      salePrice: c.salePrice,
+      currency: c.currency,
+      sourceMode: 'MOCK',
+      isFirstPublication: true,
+      marginPercent: margin.marginPercent,
+      suppliers: {
+        create: {
+          supplierId: supplier.id,
+          countryCode: c.countryCode,
+          productCost: c.productCost,
+          shippingCost: c.shippingCost,
+          stock: c.stock,
+          isPrimary: true,
+          cjVariantId: c.cjVariantId,
+          cjSku: c.cjSku,
+        },
+      },
+    },
+  });
+
+  await writeAudit('PRODUCT_DISCOVERED', 'Product', product.id, {
+    source: c.source,
+    signals: c.signals,
+  });
+
+  let pipelineResult = null;
+  if (runPipeline) {
+    const result = await runProductPipeline({
+      title: c.title,
+      salePrice: c.salePrice,
+      productCost: c.productCost,
+      shippingCost: c.shippingCost,
+      stock: c.stock,
+      opportunityScore: c.opportunityScore,
+      confidence: c.confidence,
+      supplierName: c.supplierName,
+      supplierVerified: c.supplierVerified,
+      isFirstPublication: true,
+      currency: c.currency,
+      skipAiCopy: true,
+    });
+    await saveAgentRun(result, { productId: product.id, storeId });
+    await prisma.product.update({
+      where: { id: product.id },
+      data: {
+        marginPercent: result.marginPercent,
+        status:
+          result.status === 'BLOCKED'
+            ? 'REJECTED'
+            : result.status === 'NEEDS_APPROVAL'
+              ? 'PENDING_APPROVAL'
+              : result.status === 'ELIGIBLE'
+                ? 'EVALUATING'
+                : 'DETECTED',
+      },
+    });
+    pipelineResult = result;
+  }
+
+  return { productId: product.id, created: true, pipeline: pipelineResult, skipped: false };
 }
 
 function enrichProduct(p: any) {
@@ -268,10 +363,11 @@ class HealthController {
       service: 'ecom-api',
       mode: MODE,
       timestamp: new Date().toISOString(),
-      block: 9,
+      block: 10,
       aiRouter: true,
       orchestrator: true,
       agentRuns: true,
+      discovery: true,
       persistence: 'prisma',
       shopify: shopify.canPublishLive ? 'live-ready' : 'mock',
       cj: cj.canFulfillLive ? 'live-ready' : 'mock',
@@ -282,6 +378,83 @@ class HealthController {
   @Get('rules')
   rules() {
     return { mode: MODE, rules: RULES };
+  }
+}
+
+@Controller('discovery')
+class DiscoveryController {
+  @Get('status')
+  status() {
+    return getDiscoveryStatus();
+  }
+
+  /** List candidates without writing to DB */
+  @Get('preview')
+  async preview(@Query('limit') limit = '5', @Query('includeWeak') includeWeak?: string) {
+    const found = await discoverCandidates({
+      limit: Number(limit) || 5,
+      includeWeak: includeWeak === 'true',
+    });
+    const items = found.items.map((c) => ({
+      ...c,
+      hardFilters: candidatePassesHardFilters(c),
+    }));
+    return { mode: MODE, count: items.length, items };
+  }
+
+  /** Discover + ingest into Product table (+ optional orchestrator) */
+  @Post('run')
+  async run(
+    @Body()
+    body: {
+      limit?: number;
+      includeWeak?: boolean;
+      runPipeline?: boolean;
+      onlyPassingFilters?: boolean;
+    },
+  ) {
+    const store = await prisma.store.findFirst();
+    if (!store) return { error: 'no_store' };
+
+    const found = await discoverCandidates({
+      limit: body.limit ?? 5,
+      includeWeak: Boolean(body.includeWeak),
+    });
+
+    const onlyPass = body.onlyPassingFilters !== false;
+    const runPipeline = Boolean(body.runPipeline);
+    const created: any[] = [];
+    const skipped: any[] = [];
+    const rejected: any[] = [];
+
+    for (const c of found.items) {
+      const filters = candidatePassesHardFilters(c);
+      if (onlyPass && !filters.ok) {
+        rejected.push({ title: c.title, reasons: filters.reasons });
+        continue;
+      }
+      const r = await ingestCandidate(store.id, c, runPipeline);
+      if (r.skipped) skipped.push({ title: c.title, productId: r.productId });
+      else created.push({ title: c.title, productId: r.productId, pipelineStatus: r.pipeline?.status });
+    }
+
+    await writeAudit('DISCOVERY_RUN', 'Discovery', store.id, {
+      created: created.length,
+      skipped: skipped.length,
+      rejected: rejected.length,
+    });
+
+    return {
+      mode: MODE,
+      discovered: found.count,
+      created: created.length,
+      skipped: skipped.length,
+      rejectedFilter: rejected.length,
+      items: created,
+      skippedItems: skipped,
+      rejectedItems: rejected,
+      note: 'Candidatos MOCK etiquetados. runPipeline=true ejecuta orquestador por cada alta nueva.',
+    };
   }
 }
 
@@ -321,7 +494,7 @@ class AgentRunsController {
 class OrchestratorController {
   @Get('status')
   status() {
-    return { ...getOrchestratorMeta(), block: 9, persistence: 'AgentRun' };
+    return { ...getOrchestratorMeta(), block: 10, persistence: 'AgentRun' };
   }
 
   @Post('run')
@@ -345,9 +518,7 @@ class OrchestratorController {
 
     const store = await prisma.store.findFirst();
     const saved =
-      body.persist === false
-        ? null
-        : await saveAgentRun(result, { storeId: store?.id });
+      body.persist === false ? null : await saveAgentRun(result, { storeId: store?.id });
 
     await writeAudit('ORCHESTRATOR_RUN', 'Orchestrator', result.traceId, {
       status: result.status,
@@ -573,7 +744,6 @@ class ProductsController {
     return { mode: MODE, item: enrichProduct(p) };
   }
 
-  /** Link CJ variant to primary supplier of product */
   @Post(':id/cj-link')
   async cjLink(@Param('id') id: string, @Body() body: { cjVariantId?: string; cjSku?: string }) {
     const primary = await prisma.productSupplier.findFirst({
@@ -818,6 +988,7 @@ class AuthController {
 @Module({
   controllers: [
     HealthController,
+    DiscoveryController,
     AgentsController,
     AgentRunsController,
     OrchestratorController,
@@ -839,7 +1010,7 @@ async function bootstrap() {
   const app = await NestFactory.create(AppModule);
   app.enableCors({ origin: process.env.APP_URL ?? 'http://localhost:3000' });
   await app.listen(Number(process.env.API_PORT ?? 4000));
-  console.log(`ECOM API block-9 (AgentRun) on ${process.env.API_PORT ?? 4000} mode=${MODE}`);
+  console.log(`ECOM API block-10 (discovery) on ${process.env.API_PORT ?? 4000} mode=${MODE}`);
 }
 
 void bootstrap();
