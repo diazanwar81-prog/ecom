@@ -43,6 +43,7 @@ export default function Home() {
   const [discoveryStatus, setDiscoveryStatus] = useState<any>(null);
   const [preview, setPreview] = useState<any[]>([]);
   const [jobs, setJobs] = useState<any[]>([]);
+  const [orders, setOrders] = useState<any[]>([]);
   const [rules, setRules] = useState<any>(null);
   const [aiStatus, setAiStatus] = useState<any>(null);
   const [aiResult, setAiResult] = useState<string | null>(null);
@@ -78,6 +79,8 @@ export default function Home() {
       try {
         const j = await fetch(`${API}/jobs`).then((x) => x.json());
         setJobs(j.items || []);
+        const o = await fetch(`${API}/orders`).then((x) => x.json()).catch(() => ({ items: [] }));
+        setOrders(o.items || []);
       } catch {
         setJobs([]);
       }
@@ -195,6 +198,42 @@ export default function Home() {
     await load();
   }
 
+
+  async function syncInventory(id: string) {
+    setMessage(null);
+    const res = await fetch(`${API}/products/${id}/sync-inventory`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    const data = await res.json();
+    if (data.error) setMessage(`Inventory: ${data.error}`);
+    else setMessage(`Inventory OK · available=${data.available} · ecom=${data.ecomStock}`);
+    await load();
+  }
+
+  async function fulfillOrder(id: string) {
+    setMessage(null);
+    const res = await fetch(`${API}/orders/${id}/fulfill`, { method: 'POST' });
+    const data = await res.json();
+    if (data.error) setMessage(`Fulfill: ${data.error}`);
+    else setMessage(`Fulfill OK · ${data.cj?.supplierOrderId || data.order?.status}`);
+    await load();
+  }
+
+  async function syncTracking(id: string) {
+    setMessage(null);
+    const res = await fetch(`${API}/orders/${id}/sync-tracking`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ notifyCustomer: false }),
+    });
+    const data = await res.json();
+    if (data.error) setMessage(`Tracking: ${data.error}`);
+    else setMessage(`Tracking OK · ${data.trackingNumber || data.shopify?.fulfillmentId}`);
+    await load();
+  }
+
   const bandColor = (b?: string) => {
     if (b === 'IDEAL') return '#16a34a';
     if (b === 'OPERATIONAL') return '#2563eb';
@@ -207,7 +246,7 @@ export default function Home() {
     <main style={{ fontFamily: 'system-ui, sans-serif', margin: '0 auto', maxWidth: 1120, padding: '1.5rem' }}>
       <header style={{ marginBottom: '1.25rem' }}>
         <p style={{ color: '#64748b', margin: 0 }}>ECOM · Panel operativo</p>
-        <h1 style={{ margin: '0.25rem 0' }}>Bloque {block ?? '—'} · Discovery + Orquestador + Cola</h1>
+        <h1 style={{ margin: '0.25rem 0' }}>Bloque {block ?? '—'} · Ops: pedidos · stock · fulfill</h1>
         <p>
           Modo: <strong style={{ color: mode === 'MOCK' ? '#ca8a04' : '#16a34a' }}>{mode}</strong>
           {' · '}
@@ -306,7 +345,29 @@ export default function Home() {
       </section>
 
       <section style={{ marginBottom: '1.75rem' }}>
-        <h2>Aprobaciones</h2>
+        
+      <section style={{ marginBottom: '1.75rem' }}>
+        <h2>Pedidos ({orders.length})</h2>
+        {orders.length === 0 && <p style={{ color: '#64748b' }}>Sin pedidos.</p>}
+        <div style={{ display: 'grid', gap: 8 }}>
+          {orders.map((o) => (
+            <div key={o.id} style={{ border: '1px solid #e2e8f0', borderRadius: 8, padding: 10 }}>
+              <strong>{o.orderNumber || o.id}</strong> · {o.status} · {o.total} {o.currency}
+              <div style={{ fontSize: 12, color: '#64748b' }}>
+                {o.email || 'sin email'} · {o.fulfillmentNote || ''}
+              </div>
+              <div style={{ marginTop: 6, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                {o.status !== 'FULFILLED' && (
+                  <button type="button" onClick={() => fulfillOrder(o.id)} style={{ cursor: 'pointer' }}>Fulfill CJ</button>
+                )}
+                <button type="button" onClick={() => syncTracking(o.id)} style={{ cursor: 'pointer' }}>Sync tracking Shopify</button>
+              </div>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      <h2>Aprobaciones</h2>
         {approvals.length === 0 && <p style={{ color: '#64748b' }}>Sin solicitudes.</p>}
         <div style={{ display: 'grid', gap: 8 }}>
           {approvals.map((a) => (
@@ -359,7 +420,7 @@ export default function Home() {
       </section>
 
       <footer style={{ marginTop: '2rem', fontSize: 12, color: '#94a3b8' }}>
-        Discovery MOCK/Serper · Orchestrator · AgentRun · BullMQ · Shopify/CJ live-ready. Presupuesto auto $0.
+        Discovery MOCK/Serper · Orchestrator · AgentRun · BullMQ · Shopify/CJ live-ready. Presupuesto auto $0. · Panel block 21 (orders/inventory).
       </footer>
     </main>
   );
