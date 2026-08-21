@@ -1,7 +1,7 @@
 /**
  * ECOM Shopify adapter
  * - MOCK / SANDBOX / REAL
- * - publish products + create fulfillments with tracking
+ * - publish products (with images) + create fulfillments with tracking
  */
 
 export type RuntimeMode = 'MOCK' | 'SANDBOX' | 'REAL';
@@ -22,6 +22,8 @@ export interface PublishInput {
   currency: string;
   sku?: string;
   inventory?: number | null;
+  /** Public image URLs (e.g. CJ CDN) */
+  imageUrls?: string[];
 }
 
 export interface PublishResult {
@@ -34,7 +36,6 @@ export interface PublishResult {
 }
 
 export interface FulfillmentInput {
-  /** Shopify order id (numeric string) */
   orderId: string;
   trackingNumber?: string;
   trackingCompany?: string;
@@ -124,14 +125,19 @@ export async function publishProduct(input: PublishInput): Promise<PublishResult
         title: input.title,
         price: input.price,
         currency: input.currency,
+        imageUrls: input.imageUrls,
       },
     };
   }
 
   const token = accessToken();
   const host = shopHost();
+  const images = (input.imageUrls || [])
+    .filter((u) => typeof u === 'string' && /^https?:\/\//i.test(u))
+    .slice(0, 5)
+    .map((src) => ({ src }));
 
-  const body = {
+  const body: any = {
     product: {
       title: input.title,
       body_html: input.description || input.title,
@@ -143,6 +149,7 @@ export async function publishProduct(input: PublishInput): Promise<PublishResult
           inventory_management: input.inventory != null ? 'shopify' : undefined,
         },
       ],
+      images: images.length ? images : undefined,
     },
   };
 
@@ -186,10 +193,6 @@ export async function publishProduct(input: PublishInput): Promise<PublishResult
   }
 }
 
-/**
- * Create a fulfillment on a Shopify order (with optional tracking).
- * Uses Fulfillment Orders API when possible; falls back to legacy fulfillments.json.
- */
 export async function createOrderFulfillment(input: FulfillmentInput): Promise<FulfillmentResult> {
   const status = getShopifyStatus();
   if (!input.orderId) {
@@ -210,12 +213,9 @@ export async function createOrderFulfillment(input: FulfillmentInput): Promise<F
   const orderId = String(input.orderId).replace(/\D/g, '') || input.orderId;
 
   try {
-    // 1) List fulfillment orders
     const foRes = await fetch(
       `https://${host}/admin/api/${API_VERSION}/orders/${orderId}/fulfillment_orders.json`,
-      {
-        headers: { 'X-Shopify-Access-Token': token! },
-      },
+      { headers: { 'X-Shopify-Access-Token': token! } },
     );
     const foData = (await foRes.json()) as any;
 
@@ -269,10 +269,8 @@ export async function createOrderFulfillment(input: FulfillmentInput): Promise<F
       };
     }
 
-    // 2) Legacy fallback
     const legacyBody = {
       fulfillment: {
-        location_id: undefined,
         tracking_number: input.trackingNumber,
         tracking_company: input.trackingCompany,
         tracking_url: input.trackingUrl,
