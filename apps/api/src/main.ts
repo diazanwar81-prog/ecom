@@ -978,8 +978,8 @@ async function resolveCjImageUrls(title: string, sku?: string | null): Promise<s
     const found = await searchCjProducts({ keyword, pageSize: 5 });
     if (!found.ok || !found.items?.length) return [];
     const urls: string[] = [];
-    for (const p of found.items) {
-      const u = (p as any).productImage || (p as any).productImageEn || (p as any).bigImage;
+    for (const item of found.items) {
+      const u = (item as any).productImage || (item as any).productImageEn || (item as any).bigImage;
       if (u && /^https?:\/\//i.test(String(u))) urls.push(String(u));
     }
     return urls.slice(0, 3);
@@ -988,6 +988,444 @@ async function resolveCjImageUrls(title: string, sku?: string | null): Promise<s
   }
 }
 
+function cleanProductTitle(raw: string): string {
+  return String(raw || '')
+    .replace(/\[(?:MOCK|SERPER\+CJ|SERPER|CJ)\]\s*/gi, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 120) || 'Producto ECOM';
+}
+
+@Controller('products')
+class ProductsController {
+  constructor(private readonly rules: RulesService) {}
+
+  @Get()
+  async list(@Query('status') status?: string) {
+    const where = status ? { status: status as ProductStatus } : {};
+    const rows = await prisma.product.findMany({
+      where,
+      include: { suppliers: { include: { supplier: true }, orderBy: { isPrimary: 'desc' } } },
+      orderBy: { createdAt: 'desc' },
+    });
+    return { mode: MODE, persistence: 'prisma', count: rows.length, items: rows.map(enrichProduct) };
+  }
+
+  @Get(':id')
+  async one(@Param('id') id: string) {
+    const p = await prisma.product.findUnique({
+      where: { id },
+      include: { suppliers: { include: { supplier: true }, orderBy: { isPrimary: 'desc' } } },
+    });
+    if (!p) return { error: 'not_found', mode: MODE };
+    return { mode: MODE, item: enrichProduct(p) };
+  }
+
+  @Post(':id/cj-link')
+  async cjLink(@Param('id') id: string, @Body() body: { cjVariantId?: string; cjSku?: string }) {
+    const primary = await prisma.productSupplier.findFirst({
+      where: { productId: id, isPrimary: true },
+    });
+    if (!primary) return { error: 'no_primary_supplier' };
+    const updated = await prisma.productSupplier.update({
+      where: { id: primary.id },
+      data: {
+        cjVariantId: body.cjVariantId ?? primary.cjVariantId,
+        cjSku: body.cjSku ?? primary.cjSku,
+      },
+    });
+    await writeAudit('PRODUCT_CJ_LINK', 'Product', id, {
+      cjVariantId: updated.cjVariantId,
+      cjSku: updated.cjSku,
+    });
+    return { mode: MODE, productId: id, link: updated };
+  }
+
+  @Post(':id/pipeline')
+  async pipeline(@Param('id') id: string, @Body() body: { skipAiCopy?: boolean }) {
+    const p = await prisma.product.findUnique({
+      where: { id },
+      include: { suppliers: { include: { supplier: true }, orderBy: { isPrimary: 'desc' } } },
+    });
+    if (!p) return { error: 'not_found' };
+    const enriched = enrichProduct(p);
+    const result = await runProductPipeline({
+      title: enriched.title,
+      salePrice: enriched.salePrice,
+      productCost: enriched.productCost,
+      shippingCost: enriched.shippingCost,
+      stock: enriched.stock,
+      opportunityScore: enriched.opportunityScore ?? 0,
+      confidence: enriched.confidence ?? 0,
+      supplierName: enriched.supplierName,
+      supplierVerified: enriched.verified,
+      isFirstPublication: enriched.isFirstPublication,
+      currency: enriched.currency,
+      skipAiCopy: body?.skipAiCopy !== false,
+    });
+
+    const saved = await saveAgentRun(result, { productId: id, storeId: p.storeId });
+
+    await prisma.product.update({
+      where: { id },
+      data: {
+        marginPercent: result.marginPercent,
+        description: result.suggestedDescription
+          ? result.suggestedDescription.slice(0, 4000)
+          : undefined,
+        status:
+          result.status === 'BLOCKED'
+            ? 'REJECTED'
+            : result.status === 'NEEDS_APPROVAL'
+              ? 'PENDING_APPROVAL'
+              : p.status,
+      },
+    });
+
+    await writeAudit('PRODUCT_PIPELINE', 'Product', id, {
+      status: result.status,
+      traceId: result.traceId,
+      agentRunId: saved?.id,
+    });
+
+    return { mode: MODE, productId: id, agentRunId: saved?.id ?? null, result };
+  }
+
+  @Post(':id/evaluate')
+  async evaluate(@Param('id') id: string) {
+    const p = await prisma.product.findUnique({
+      where: { id },
+      include: { suppliers: { include: { supplier: true }, orderBy: { isPrimary: 'desc' } } },
+    });
+    if (!p) return { error: 'not_found' };
+    const enriched = enrichProduct(p);
+    const margin = this.rules.evaluateMargin(enriched.salePrice, {
+      productCost: enriched.productCost,
+      shippingCost: enriched.shippingCost,
+    });
+    await prisma.product.update({ where: { id }, data: { marginPercent: margin.marginPercent } });
+    await writeAudit('PRODUCT_EVALUATED', 'Product', id, { margin: margin.marginPercent });
+    return { mode: MODE, item: { ...enriched, marginPercent: margin.marginPercent, marginBand: margin.band } };
+  }
+
+  @Post(':id/request-approval')
+  async requestApproval(@Param('id') id: string, @Body() body: { action: string; reason?: string }) {
+    const p = await prisma.product.findUnique({ where: { id } });
+    if (!p) return { error: 'not_found' };
+    const admin = await prisma.user.findFirst({ where: { email: 'admin@ecom.local' } });
+    const action = body.action || 'FIRST_PUBLICATION';
+    const approval = await prisma.approval.create({
+      data: {
+        productId: id,
+        requestedBy: admin?.id ?? 'system',
+        action,
+        reason: body.reason || `Aprobación requerida: ${action}`,
+        status: 'PENDING',
+        metadata: { requiresHuman: requiresHumanApproval(action) },
+      },
+    });
+    await prisma.product.update({ where: { id }, data: { status: 'PENDING_APPROVAL' } });
+    await writeAudit('APPROVAL_REQUESTED', 'Approval', approval.id, approval);
+    return { mode: MODE, approval };
+  }
+
+  @Post(':id/publish')
+  async publish(@Param('id') id: string) {
+    const p = await prisma.product.findUnique({
+      where: { id },
+      include: { suppliers: { include: { supplier: true }, orderBy: { isPrimary: 'desc' } } },
+    });
+    if (!p) return { error: 'not_found' };
+    const enriched = enrichProduct(p);
+    if (enriched.shouldPause || !enriched.canPublish) {
+      return { error: 'rules_block', reason: 'Margen/stock no permiten publicación', item: enriched };
+    }
+    if (p.isFirstPublication) {
+      const anyApproved = await prisma.approval.findFirst({
+        where: { productId: id, status: 'APPROVED' },
+      });
+      if (!anyApproved) {
+        return { error: 'approval_required', reason: 'Primera publicación requiere aprobación humana' };
+      }
+    }
+
+    const imageUrlsPub = await resolveCjImageUrls(enriched.title, enriched.cjSku);
+    const result = await publishProduct({
+      title: enriched.title,
+      description: enriched.description,
+      price: enriched.salePrice,
+      currency: enriched.currency,
+      sku: enriched.cjSku || `ECOM-${id.slice(-8)}`,
+      inventory: enriched.stock,
+      imageUrls: imageUrlsPub,
+    });
+    if (!result.ok) {
+      await writeAudit('PUBLISH_FAILED', 'Product', id, result);
+      return { mode: MODE, error: 'publish_failed', result };
+    }
+
+    const updated = await prisma.product.update({
+      where: { id },
+      data: {
+        status: 'PUBLISHED',
+        externalId: result.externalId,
+        isFirstPublication: false,
+        sourceMode: result.mock ? 'MOCK' : MODE_ENUM,
+      },
+    });
+    await writeAudit('PRODUCT_PUBLISHED', 'Product', id, result);
+    return { mode: MODE, published: true, mock: result.mock, product: updated, shopify: result };
+  }
+
+
+  /** Block 15: human OK + publish Shopify in one step (CJ links preserved on product). */
+  @Post(':id/go-live')
+  async goLive(@Param('id') id: string, @Body() body: { note?: string; skipAiCopy?: boolean }) {
+    const p = await prisma.product.findUnique({
+      where: { id },
+      include: { suppliers: { include: { supplier: true }, orderBy: { isPrimary: 'desc' } } },
+    });
+    if (!p) return { error: 'not_found' };
+    const enriched = enrichProduct(p);
+    if (enriched.shouldPause || !enriched.canPublish) {
+      return { error: 'rules_block', reason: 'Margen/stock no permiten publicación', item: enriched };
+    }
+
+    const admin = await prisma.user.findFirst({ where: { email: 'admin@ecom.local' } });
+    let approval = await prisma.approval.findFirst({
+      where: { productId: id, status: 'APPROVED' },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    if (!approval) {
+      const pending = await prisma.approval.findFirst({
+        where: { productId: id, status: 'PENDING' },
+        orderBy: { createdAt: 'desc' },
+      });
+      if (pending) {
+        approval = await prisma.approval.update({
+          where: { id: pending.id },
+          data: {
+            status: 'APPROVED',
+            decidedAt: new Date(),
+            metadata: { ...(pending.metadata as object), note: body?.note || 'go-live', via: 'go-live' },
+          },
+        });
+      } else {
+        approval = await prisma.approval.create({
+          data: {
+            productId: id,
+            requestedBy: admin?.id ?? 'system',
+            action: 'FIRST_PUBLICATION',
+            reason: body?.note || 'Go-live: aprobación + publicación',
+            status: 'APPROVED',
+            decidedAt: new Date(),
+            metadata: { via: 'go-live', requiresHuman: true },
+          },
+        });
+      }
+      await writeAudit('APPROVAL_APPROVED', 'Approval', approval.id, { via: 'go-live' });
+    }
+
+    // Block 16: clean title + optional AI copy (skip with body.skipAiCopy=true)
+    const skipAi = Boolean((body as any)?.skipAiCopy);
+    let liveTitle = cleanProductTitle(enriched.title);
+    let liveDescription = enriched.description || '';
+    let copyMeta: Record<string, unknown> = { skipped: skipAi };
+
+    if (!skipAi) {
+      try {
+        const copy = await generateProductCopy({
+          title: liveTitle,
+          facts: `precio ${enriched.salePrice} ${enriched.currency}, costo ${enriched.productCost}, stock ${enriched.stock}, proveedor CJ, sku ${enriched.cjSku || 'n/a'}`,
+          language: 'es-CO',
+        });
+        copyMeta = {
+          ok: copy.ok,
+          provider: copy.provider,
+          model: copy.model,
+          mock: copy.mock,
+        };
+        if (copy.ok && copy.text) {
+          liveDescription = copy.text.slice(0, 4000);
+          // First non-empty line as optional short title if original was noisy
+          const firstLine = liveDescription.split('\n').map((s) => s.trim()).find(Boolean);
+          if (firstLine && firstLine.length >= 12 && firstLine.length <= 90 && /\[/.test(enriched.title)) {
+            liveTitle = firstLine.replace(/^#+\s*/, '').slice(0, 120);
+          }
+        }
+      } catch (e: any) {
+        copyMeta = { ok: false, error: e?.message || 'copy_failed' };
+      }
+    }
+
+    if (liveDescription || liveTitle !== enriched.title) {
+      await prisma.product.update({
+        where: { id },
+        data: {
+          title: liveTitle,
+          description: liveDescription || null,
+        },
+      });
+    }
+
+    const sku = enriched.cjSku || `ECOM-${id.slice(-8)}`;
+    // Block 19: attach CJ catalog images when available
+    const imageUrls = await resolveCjImageUrls(liveTitle, enriched.cjSku);
+    const result = await publishProduct({
+      title: liveTitle,
+      description: liveDescription || liveTitle,
+      price: enriched.salePrice,
+      currency: enriched.currency,
+      sku,
+      inventory: enriched.stock,
+      imageUrls,
+    });
+    if (!result.ok) {
+      await writeAudit('GO_LIVE_FAILED', 'Product', id, result);
+      return { mode: MODE, error: 'publish_failed', approval, result, copy: copyMeta };
+    }
+
+    const updated = await prisma.product.update({
+      where: { id },
+      data: {
+        status: 'PUBLISHED',
+        externalId: result.externalId,
+        isFirstPublication: false,
+        sourceMode: result.mock ? 'MOCK' : MODE_ENUM,
+        title: liveTitle,
+        description: liveDescription || null,
+      },
+    });
+    await writeAudit('PRODUCT_GO_LIVE', 'Product', id, {
+      shopify: result.externalId,
+      cjVariantId: enriched.cjVariantId,
+      cjSku: enriched.cjSku,
+      mock: result.mock,
+      copy: copyMeta,
+      title: liveTitle,
+    });
+
+    return {
+      mode: MODE,
+      published: true,
+      mock: result.mock,
+      product: updated,
+      approval,
+      shopify: result,
+      copy: copyMeta,
+      cj: { variantId: enriched.cjVariantId, sku: enriched.cjSku },
+      note: 'Go-live con copy IA (bloque 16). Título limpio + descripción es-CO. CJ conservado.',
+    };
+  }
+
+  @Post(':id/generate-copy')
+  async generateCopy(@Param('id') id: string) {
+    const p = await prisma.product.findUnique({
+      where: { id },
+      include: { suppliers: { include: { supplier: true }, orderBy: { isPrimary: 'desc' } } },
+    });
+    if (!p) return { error: 'not_found' };
+    const enriched = enrichProduct(p);
+    const result = await generateProductCopy({
+      title: enriched.title,
+      facts: `costo ${enriched.productCost}, stock ${enriched.stock}, proveedor ${enriched.supplierName}`,
+      language: 'es-CO',
+    });
+    if (result.ok && result.text) {
+      await prisma.product.update({ where: { id }, data: { description: result.text.slice(0, 4000) } });
+    }
+    await writeAudit('AI_PRODUCT_COPY', 'Product', id, { provider: result.provider });
+    return { mode: MODE, productId: id, result };
+  }
+}
+
+@Controller('approvals')
+class ApprovalsController {
+  @Get()
+  async list(@Query('status') status?: string) {
+    const where = status ? { status: status as ApprovalStatus } : {};
+    const items = await prisma.approval.findMany({ where, orderBy: { createdAt: 'desc' }, take: 100 });
+    return { mode: MODE, count: items.length, items };
+  }
+
+  @Post(':id/decide')
+  async decide(@Param('id') id: string, @Body() body: { decision: 'APPROVED' | 'REJECTED'; note?: string }) {
+    const a = await prisma.approval.findUnique({ where: { id } });
+    if (!a) return { error: 'not_found' };
+    if (a.status !== 'PENDING') return { error: 'already_decided' };
+    const decision = body.decision === 'APPROVED' ? 'APPROVED' : 'REJECTED';
+    const approval = await prisma.approval.update({
+      where: { id },
+      data: {
+        status: decision as ApprovalStatus,
+        decidedAt: new Date(),
+        metadata: { ...(a.metadata as object), note: body.note },
+      },
+    });
+    let product = null;
+    if (a.productId) {
+      product = await prisma.product.update({
+        where: { id: a.productId },
+        data: { status: decision === 'APPROVED' ? 'DRAFT' : 'REJECTED' },
+      });
+    }
+    await writeAudit(`APPROVAL_${decision}`, 'Approval', id, { productId: a.productId });
+    return { mode: MODE, approval, product, next: decision === 'APPROVED' ? 'POST /products/:id/publish' : null };
+  }
+}
+
+@Controller('audit')
+class AuditController {
+  @Get()
+  async list(@Query('limit') limit = '50') {
+    const n = Math.min(Number(limit) || 50, 200);
+    const items = await prisma.auditLog.findMany({ orderBy: { createdAt: 'desc' }, take: n });
+    return { mode: MODE, count: items.length, items };
+  }
+}
+
+@Controller('auth')
+class AuthController {
+  @Get('me')
+  async me() {
+    const user = await prisma.user.findFirst({ where: { email: 'admin@ecom.local' } });
+    return { mode: MODE, user: user ? { id: user.id, email: user.email, name: user.name, role: user.role } : null };
+  }
+
+  @Post('login')
+  async login(@Body() body: { email?: string }) {
+    const user = await prisma.user.findFirst({ where: { email: body.email || 'admin@ecom.local' } });
+    if (!user) return { error: 'invalid_credentials' };
+    await writeAudit('LOGIN_MOCK', 'User', user.id);
+    return {
+      mode: MODE,
+      token: 'mock-session-token',
+      user: { id: user.id, email: user.email, name: user.name, role: user.role },
+    };
+  }
+}
+
+@Module({
+  controllers: [
+    HealthController,
+    DiscoveryController,
+    JobsController,
+    AgentsController,
+    AgentRunsController,
+    OrchestratorController,
+    CjController,
+    ShopifyController,
+    OrdersController,
+    AiController,
+    ProductsController,
+    ApprovalsController,
+    AuditController,
+    AuthController,
+  ],
+  providers: [RulesService],
+})
+class AppModule {}
 
 async function bootstrap() {
   await ensureSeed();
