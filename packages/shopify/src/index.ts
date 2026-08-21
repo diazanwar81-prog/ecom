@@ -319,3 +319,105 @@ export function createMockOrder(productTitle: string, price: number, currency = 
     createdAt: new Date().toISOString(),
   };
 }
+
+
+export interface InventorySetInput {
+  inventoryItemId: string;
+  available: number;
+  locationId?: string;
+}
+
+export interface InventorySetResult {
+  ok: boolean;
+  mock: boolean;
+  available?: number;
+  locationId?: string;
+  error?: string;
+  raw?: unknown;
+}
+
+export async function getPrimaryLocationId(): Promise<{ ok: boolean; locationId?: string; error?: string; mock?: boolean }> {
+  const status = getShopifyStatus();
+  if (!status.canPublishLive) {
+    return { ok: true, locationId: 'mock-location', mock: true };
+  }
+  const token = accessToken();
+  const host = shopHost();
+  try {
+    const res = await fetch(`https://${host}/admin/api/${API_VERSION}/locations.json`, {
+      headers: { 'X-Shopify-Access-Token': token! },
+    });
+    const data = (await res.json()) as any;
+    if (!res.ok) {
+      return { ok: false, error: data?.errors ? JSON.stringify(data.errors) : `locations HTTP ${res.status}` };
+    }
+    const locs = data?.locations || [];
+    const active = locs.find((l: any) => l.active && l.legacy === false) || locs.find((l: any) => l.active) || locs[0];
+    if (!active?.id) return { ok: false, error: 'no_location' };
+    return { ok: true, locationId: String(active.id) };
+  } catch (e: any) {
+    return { ok: false, error: e?.message || 'locations network error' };
+  }
+}
+
+export async function setInventoryLevel(input: InventorySetInput): Promise<InventorySetResult> {
+  const status = getShopifyStatus();
+  const available = Math.max(0, Math.floor(Number(input.available) || 0));
+  if (!input.inventoryItemId) {
+    return { ok: false, mock: false, error: 'inventoryItemId required' };
+  }
+
+  if (!status.canPublishLive) {
+    return {
+      ok: true,
+      mock: true,
+      available,
+      locationId: input.locationId || 'mock-location',
+      raw: { simulated: true },
+    };
+  }
+
+  const token = accessToken();
+  const host = shopHost();
+  let locationId = input.locationId;
+  if (!locationId) {
+    const loc = await getPrimaryLocationId();
+    if (!loc.ok || !loc.locationId) {
+      return { ok: false, mock: false, error: loc.error || 'no location' };
+    }
+    locationId = loc.locationId;
+  }
+
+  try {
+    const res = await fetch(`https://${host}/admin/api/${API_VERSION}/inventory_levels/set.json`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Shopify-Access-Token': token!,
+      },
+      body: JSON.stringify({
+        location_id: Number(locationId),
+        inventory_item_id: Number(input.inventoryItemId),
+        available,
+      }),
+    });
+    const data = (await res.json()) as any;
+    if (!res.ok) {
+      return {
+        ok: false,
+        mock: false,
+        error: data?.errors ? JSON.stringify(data.errors) : `inventory set HTTP ${res.status}`,
+        raw: data,
+      };
+    }
+    return {
+      ok: true,
+      mock: false,
+      available: data?.inventory_level?.available ?? available,
+      locationId,
+      raw: data,
+    };
+  } catch (e: any) {
+    return { ok: false, mock: false, error: e?.message || 'inventory network error' };
+  }
+}

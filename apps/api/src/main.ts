@@ -19,6 +19,8 @@ import {
   publishProduct,
   createMockOrder,
   createOrderFulfillment,
+  setInventoryLevel,
+  getPrimaryLocationId,
 } from '../../../packages/shopify/src/index';
 import { getCjStatus, fulfillOrder, searchCjProducts } from '../../../packages/cj/src/index';
 import {
@@ -372,7 +374,7 @@ class HealthController {
       service: 'ecom-api',
       mode: MODE,
       timestamp: new Date().toISOString(),
-      block: 19,
+      block: 20,
       aiRouter: true,
       orchestrator: true,
       agentRuns: true,
@@ -1179,7 +1181,59 @@ class ProductsController {
 
 
   /** Block 15: human OK + publish Shopify in one step (CJ links preserved on product). */
-  @Post(':id/go-live')
+  
+  @Post(':id/sync-inventory')
+  async syncInventory(@Param('id') id: string, @Body() body: { available?: number }) {
+    const row = await prisma.product.findUnique({
+      where: { id },
+      include: { suppliers: { orderBy: { isPrimary: 'desc' }, take: 1 } },
+    });
+    if (!row) return { error: 'not_found' };
+    if (!row.externalId || String(row.externalId).startsWith('mock')) {
+      return { error: 'not_published', reason: 'Sin externalId de Shopify' };
+    }
+    const enriched = enrichProduct(row);
+    const available = body?.available != null ? Number(body.available) : Number(enriched.stock ?? 0);
+
+    // Fetch variant inventory_item_id from Shopify product
+    const status = getShopifyStatus();
+    if (!status.canPublishLive) {
+      const mock = await setInventoryLevel({ inventoryItemId: 'mock', available });
+      return { mode: MODE, synced: true, mock: true, available, shopify: mock };
+    }
+
+    try {
+      const shop = (process.env.SHOPIFY_SHOP_DOMAIN || process.env.SHOPIFY_SHOP || '').replace(/\r/g, '').trim();
+      const host = shop.includes('.') ? shop : `${shop}.myshopify.com`;
+      const token = (process.env.SHOPIFY_ACCESS_TOKEN || '').trim();
+      const ver = process.env.SHOPIFY_API_VERSION || '2026-07';
+      const res = await fetch(`https://${host}/admin/api/${ver}/products/${row.externalId}.json`, {
+        headers: { 'X-Shopify-Access-Token': token },
+      });
+      const data = (await res.json()) as any;
+      const invItemId = data?.product?.variants?.[0]?.inventory_item_id;
+      if (!invItemId) {
+        return { error: 'no_inventory_item', raw: data };
+      }
+      const result = await setInventoryLevel({
+        inventoryItemId: String(invItemId),
+        available,
+      });
+      await writeAudit('INVENTORY_SYNC', 'Product', id, result);
+      return {
+        mode: MODE,
+        synced: result.ok,
+        mock: result.mock,
+        available: result.available ?? available,
+        ecomStock: enriched.stock,
+        shopify: result,
+      };
+    } catch (e: any) {
+      return { error: e?.message || 'sync_failed' };
+    }
+  }
+
+@Post(':id/go-live')
   async goLive(@Param('id') id: string, @Body() body: { note?: string; skipAiCopy?: boolean }) {
     const p = await prisma.product.findUnique({
       where: { id },
@@ -1281,6 +1335,25 @@ class ProductsController {
       inventory: enriched.stock,
       imageUrls,
     });
+
+
+    let inventorySync: any = null;
+    if (result.ok && enriched.stock != null) {
+      try {
+        const invItemId =
+          (result.raw as any)?.product?.variants?.[0]?.inventory_item_id ||
+          (result.raw as any)?.product?.variants?.[0]?.inventory_item_id;
+        if (invItemId) {
+          inventorySync = await setInventoryLevel({
+            inventoryItemId: String(invItemId),
+            available: Number(enriched.stock) || 0,
+          });
+          await writeAudit('INVENTORY_SYNC', 'Product', id, inventorySync);
+        }
+      } catch (e: any) {
+        inventorySync = { ok: false, error: e?.message };
+      }
+    }
     if (!result.ok) {
       await writeAudit('GO_LIVE_FAILED', 'Product', id, result);
       return { mode: MODE, error: 'publish_failed', approval, result, copy: copyMeta };
@@ -1315,6 +1388,7 @@ class ProductsController {
       shopify: result,
       copy: copyMeta,
       cj: { variantId: enriched.cjVariantId, sku: enriched.cjSku },
+      inventorySync,
       note: 'Go-live con copy IA (bloque 16). Título limpio + descripción es-CO. CJ conservado.',
     };
   }
@@ -1485,7 +1559,7 @@ async function bootstrap() {
   const app = await NestFactory.create(AppModule);
   app.enableCors({ origin: process.env.APP_URL ?? 'http://localhost:3000' });
   await app.listen(Number(process.env.API_PORT ?? 4000));
-  console.log(`ECOM API block-19 (images) on ${process.env.API_PORT ?? 4000} mode=${MODE}`);
+  console.log(`ECOM API block-20 (inventory) on ${process.env.API_PORT ?? 4000} mode=${MODE}`);
 }
 
 void bootstrap();
