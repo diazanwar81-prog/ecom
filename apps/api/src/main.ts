@@ -23,8 +23,8 @@ import { getCjStatus, fulfillOrder } from '../../../packages/cj/src/index';
 import {
   runProductPipeline,
   getOrchestratorMeta,
-  listAgents,
   type CandidateInput,
+  type PipelineResult,
 } from '../../../packages/orchestrator/src/index';
 import { prisma, ProductStatus, ApprovalStatus, RuntimeMode } from '../../../packages/database/src/index';
 
@@ -35,6 +35,37 @@ function num(v: unknown, fallback = 0): number {
   if (v == null) return fallback;
   const n = typeof v === 'object' && v !== null && 'toNumber' in v ? (v as any).toNumber() : Number(v);
   return Number.isFinite(n) ? n : fallback;
+}
+
+function mapPipelineStatus(s: string): 'RUNNING' | 'NEEDS_APPROVAL' | 'ELIGIBLE' | 'BLOCKED' | 'FAILED' | 'COMPLETED' {
+  const allowed = ['RUNNING', 'NEEDS_APPROVAL', 'ELIGIBLE', 'BLOCKED', 'FAILED', 'COMPLETED'] as const;
+  return (allowed as readonly string[]).includes(s) ? (s as any) : 'FAILED';
+}
+
+async function saveAgentRun(result: PipelineResult, opts?: { productId?: string; storeId?: string }) {
+  try {
+    return await prisma.agentRun.create({
+      data: {
+        traceId: result.traceId,
+        productId: opts?.productId,
+        storeId: opts?.storeId,
+        productTitle: result.productTitle,
+        status: mapPipelineStatus(result.status) as any,
+        marginPercent: result.marginPercent,
+        marginBand: result.marginBand,
+        opportunityScore: result.opportunityScore,
+        confidence: result.confidence,
+        canPublish: result.canPublish,
+        needsApproval: result.needsHumanApproval,
+        blockedReasons: result.blockedReasons as any,
+        steps: result.steps as any,
+        runtimeMode: MODE_ENUM,
+      },
+    });
+  } catch (e: any) {
+    console.warn('saveAgentRun failed', e?.message);
+    return null;
+  }
 }
 
 function enrichProduct(p: any) {
@@ -74,6 +105,8 @@ function enrichProduct(p: any) {
     externalId: p.externalId,
     supplierName,
     verified,
+    cjVariantId: primary?.cjVariantId ?? null,
+    cjSku: primary?.cjSku ?? null,
     marginPercent: margin.marginPercent,
     marginBand: margin.band,
     canPublish: margin.canPublish && !stockDec.shouldPause,
@@ -135,6 +168,8 @@ async function ensureSeed() {
       stock: 120,
       isFirstPublication: true,
       supplier: suppliers[0],
+      cjVariantId: process.env.CJ_DEFAULT_VID || null,
+      cjSku: process.env.CJ_DEFAULT_SKU || null,
     },
     {
       title: '[MOCK] Lámpara LED portátil',
@@ -147,6 +182,8 @@ async function ensureSeed() {
       stock: 45,
       isFirstPublication: true,
       supplier: suppliers[1],
+      cjVariantId: null as string | null,
+      cjSku: null as string | null,
     },
     {
       title: '[MOCK] Producto bajo margen',
@@ -159,6 +196,8 @@ async function ensureSeed() {
       stock: 0,
       isFirstPublication: false,
       supplier: suppliers[2],
+      cjVariantId: null as string | null,
+      cjSku: null as string | null,
     },
   ];
 
@@ -187,6 +226,8 @@ async function ensureSeed() {
             shippingCost: s.shippingCost,
             stock: s.stock,
             isPrimary: true,
+            cjVariantId: s.cjVariantId,
+            cjSku: s.cjSku,
           },
         },
       },
@@ -227,9 +268,10 @@ class HealthController {
       service: 'ecom-api',
       mode: MODE,
       timestamp: new Date().toISOString(),
-      block: 8,
+      block: 9,
       aiRouter: true,
       orchestrator: true,
+      agentRuns: true,
       persistence: 'prisma',
       shopify: shopify.canPublishLive ? 'live-ready' : 'mock',
       cj: cj.canFulfillLive ? 'live-ready' : 'mock',
@@ -251,16 +293,39 @@ class AgentsController {
   }
 }
 
+@Controller('agent-runs')
+class AgentRunsController {
+  @Get()
+  async list(@Query('limit') limit = '30', @Query('productId') productId?: string) {
+    const n = Math.min(Number(limit) || 30, 100);
+    const where = productId ? { productId } : {};
+    const items = await prisma.agentRun.findMany({
+      where,
+      orderBy: { createdAt: 'desc' },
+      take: n,
+    });
+    return { mode: MODE, count: items.length, items };
+  }
+
+  @Get(':traceId')
+  async one(@Param('traceId') traceId: string) {
+    const run = await prisma.agentRun.findFirst({
+      where: { OR: [{ traceId }, { id: traceId }] },
+    });
+    if (!run) return { error: 'not_found' };
+    return { mode: MODE, run };
+  }
+}
+
 @Controller('orchestrator')
 class OrchestratorController {
   @Get('status')
   status() {
-    return getOrchestratorMeta();
+    return { ...getOrchestratorMeta(), block: 9, persistence: 'AgentRun' };
   }
 
-  /** Evaluate a candidate without persisting (dry-run pipeline) */
   @Post('run')
-  async run(@Body() body: CandidateInput & { skipAiCopy?: boolean }) {
+  async run(@Body() body: CandidateInput & { skipAiCopy?: boolean; persist?: boolean }) {
     const result = await runProductPipeline({
       title: body.title || 'Candidato',
       salePrice: Number(body.salePrice) || 0,
@@ -275,14 +340,22 @@ class OrchestratorController {
       countryCode: body.countryCode || 'CO',
       currency: body.currency || 'COP',
       facts: body.facts,
-      skipAiCopy: body.skipAiCopy !== false, // default skip AI for speed unless false
+      skipAiCopy: body.skipAiCopy !== false,
     });
+
+    const store = await prisma.store.findFirst();
+    const saved =
+      body.persist === false
+        ? null
+        : await saveAgentRun(result, { storeId: store?.id });
+
     await writeAudit('ORCHESTRATOR_RUN', 'Orchestrator', result.traceId, {
       status: result.status,
       title: result.productTitle,
       margin: result.marginPercent,
+      saved: Boolean(saved),
     });
-    return { mode: MODE, result };
+    return { mode: MODE, result, agentRunId: saved?.id ?? null };
   }
 }
 
@@ -346,9 +419,7 @@ class ShopifyController {
     @Headers('x-shopify-topic') topic?: string,
   ) {
     const secret = (process.env.SHOPIFY_WEBHOOK_SECRET || '').trim();
-    if (secret && !hmac) {
-      return { error: 'missing_hmac' };
-    }
+    if (secret && !hmac) return { error: 'missing_hmac' };
     if (secret && hmac) {
       await writeAudit('SHOPIFY_WEBHOOK_HMAC_PRESENT', 'Shopify', topic || 'orders', {
         hmacPrefix: hmac.slice(0, 8),
@@ -409,9 +480,7 @@ class OrdersController {
   async fulfill(@Param('id') id: string) {
     const order = await prisma.order.findUnique({ where: { id } });
     if (!order) return { error: 'not_found' };
-    if (order.status === 'FULFILLED') {
-      return { error: 'already_fulfilled', order };
-    }
+    if (order.status === 'FULFILLED') return { error: 'already_fulfilled', order };
 
     const items = (order.lineItems as any[]) || [];
     const first = items[0] || { title: 'Producto', quantity: 1 };
@@ -438,16 +507,13 @@ class OrdersController {
     });
 
     await writeAudit('ORDER_FULFILLED', 'Order', id, result);
-
     return {
       mode: MODE,
       fulfilled: true,
       mock: result.mock,
       order: updated,
       cj: result,
-      note: result.mock
-        ? 'Fulfillment MOCK — sin pedido real a CJ.'
-        : 'Fulfillment enviado a CJ',
+      note: result.mock ? 'Fulfillment MOCK' : 'Fulfillment enviado a CJ',
     };
   }
 }
@@ -507,7 +573,27 @@ class ProductsController {
     return { mode: MODE, item: enrichProduct(p) };
   }
 
-  /** Run multi-agent pipeline on an existing product */
+  /** Link CJ variant to primary supplier of product */
+  @Post(':id/cj-link')
+  async cjLink(@Param('id') id: string, @Body() body: { cjVariantId?: string; cjSku?: string }) {
+    const primary = await prisma.productSupplier.findFirst({
+      where: { productId: id, isPrimary: true },
+    });
+    if (!primary) return { error: 'no_primary_supplier' };
+    const updated = await prisma.productSupplier.update({
+      where: { id: primary.id },
+      data: {
+        cjVariantId: body.cjVariantId ?? primary.cjVariantId,
+        cjSku: body.cjSku ?? primary.cjSku,
+      },
+    });
+    await writeAudit('PRODUCT_CJ_LINK', 'Product', id, {
+      cjVariantId: updated.cjVariantId,
+      cjSku: updated.cjSku,
+    });
+    return { mode: MODE, productId: id, link: updated };
+  }
+
   @Post(':id/pipeline')
   async pipeline(@Param('id') id: string, @Body() body: { skipAiCopy?: boolean }) {
     const p = await prisma.product.findUnique({
@@ -531,34 +617,31 @@ class ProductsController {
       skipAiCopy: body?.skipAiCopy !== false,
     });
 
-    if (result.suggestedDescription) {
-      await prisma.product.update({
-        where: { id },
-        data: {
-          description: result.suggestedDescription.slice(0, 4000),
-          marginPercent: result.marginPercent,
-          status:
-            result.status === 'BLOCKED'
-              ? 'REJECTED'
-              : result.status === 'NEEDS_APPROVAL'
-                ? 'PENDING_APPROVAL'
-                : p.status,
-        },
-      });
-    } else {
-      await prisma.product.update({
-        where: { id },
-        data: { marginPercent: result.marginPercent },
-      });
-    }
+    const saved = await saveAgentRun(result, { productId: id, storeId: p.storeId });
+
+    await prisma.product.update({
+      where: { id },
+      data: {
+        marginPercent: result.marginPercent,
+        description: result.suggestedDescription
+          ? result.suggestedDescription.slice(0, 4000)
+          : undefined,
+        status:
+          result.status === 'BLOCKED'
+            ? 'REJECTED'
+            : result.status === 'NEEDS_APPROVAL'
+              ? 'PENDING_APPROVAL'
+              : p.status,
+      },
+    });
 
     await writeAudit('PRODUCT_PIPELINE', 'Product', id, {
       status: result.status,
       traceId: result.traceId,
-      margin: result.marginPercent,
+      agentRunId: saved?.id,
     });
 
-    return { mode: MODE, productId: id, result };
+    return { mode: MODE, productId: id, agentRunId: saved?.id ?? null, result };
   }
 
   @Post(':id/evaluate')
@@ -736,6 +819,7 @@ class AuthController {
   controllers: [
     HealthController,
     AgentsController,
+    AgentRunsController,
     OrchestratorController,
     CjController,
     ShopifyController,
@@ -755,7 +839,7 @@ async function bootstrap() {
   const app = await NestFactory.create(AppModule);
   app.enableCors({ origin: process.env.APP_URL ?? 'http://localhost:3000' });
   await app.listen(Number(process.env.API_PORT ?? 4000));
-  console.log(`ECOM API block-8 (orchestrator) on ${process.env.API_PORT ?? 4000} mode=${MODE}`);
+  console.log(`ECOM API block-9 (AgentRun) on ${process.env.API_PORT ?? 4000} mode=${MODE}`);
 }
 
 void bootstrap();
