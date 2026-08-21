@@ -20,7 +20,7 @@ import {
   createMockOrder,
   createOrderFulfillment,
 } from '../../../packages/shopify/src/index';
-import { getCjStatus, fulfillOrder } from '../../../packages/cj/src/index';
+import { getCjStatus, fulfillOrder, searchCjProducts } from '../../../packages/cj/src/index';
 import {
   runProductPipeline,
   getOrchestratorMeta,
@@ -372,7 +372,7 @@ class HealthController {
       service: 'ecom-api',
       mode: MODE,
       timestamp: new Date().toISOString(),
-      block: 18,
+      block: 19,
       aiRouter: true,
       orchestrator: true,
       agentRuns: true,
@@ -962,6 +962,29 @@ class AiController {
   }
 }
 
+
+async function resolveCjImageUrls(title: string, sku?: string | null): Promise<string[]> {
+  try {
+    const keyword =
+      (sku && String(sku)) ||
+      String(title || '')
+        .replace(/\[(?:MOCK|SERPER\+CJ|SERPER|CJ)\]\s*/gi, '')
+        .split(/\s+/)
+        .filter((w) => w.length > 3)
+        .slice(0, 4)
+        .join(' ');
+    if (!keyword) return [];
+    const found = await searchCjProducts({ keyword, pageSize: 3 });
+    if (!found.ok) return [];
+    const urls = found.items
+      .map((p) => p.productImage)
+      .filter((u): u is string => Boolean(u && /^https?:\/\//i.test(u)));
+    return urls.slice(0, 3);
+  } catch {
+    return [];
+  }
+}
+
 function cleanProductTitle(raw: string): string {
   return String(raw || '')
     .replace(/\[(?:MOCK|SERPER\+CJ|SERPER|CJ)\]\s*/gi, '')
@@ -1123,6 +1146,7 @@ class ProductsController {
       }
     }
 
+    const imageUrlsPub = await resolveCjImageUrls(enriched.title, enriched.cjSku);
     const result = await publishProduct({
       title: enriched.title,
       description: enriched.description,
@@ -1130,6 +1154,7 @@ class ProductsController {
       currency: enriched.currency,
       sku: enriched.cjSku || `ECOM-${id.slice(-8)}`,
       inventory: enriched.stock,
+      imageUrls: imageUrlsPub,
     });
     if (!result.ok) {
       await writeAudit('PUBLISH_FAILED', 'Product', id, result);
@@ -1242,6 +1267,8 @@ class ProductsController {
     }
 
     const sku = enriched.cjSku || `ECOM-${id.slice(-8)}`;
+    // Block 19: attach CJ catalog images when available
+    const imageUrls = await resolveCjImageUrls(liveTitle, enriched.cjSku);
     const result = await publishProduct({
       title: liveTitle,
       description: liveDescription || liveTitle,
@@ -1249,6 +1276,7 @@ class ProductsController {
       currency: enriched.currency,
       sku,
       inventory: enriched.stock,
+      imageUrls,
     });
     if (!result.ok) {
       await writeAudit('GO_LIVE_FAILED', 'Product', id, result);
@@ -1454,7 +1482,7 @@ async function bootstrap() {
   const app = await NestFactory.create(AppModule);
   app.enableCors({ origin: process.env.APP_URL ?? 'http://localhost:3000' });
   await app.listen(Number(process.env.API_PORT ?? 4000));
-  console.log(`ECOM API block-18 (tracking) on ${process.env.API_PORT ?? 4000} mode=${MODE}`);
+  console.log(`ECOM API block-19 (images) on ${process.env.API_PORT ?? 4000} mode=${MODE}`);
 }
 
 void bootstrap();
