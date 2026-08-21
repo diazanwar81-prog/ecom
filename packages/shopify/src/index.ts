@@ -1,9 +1,7 @@
 /**
  * ECOM Shopify adapter
- * - MOCK: simulates product publish + orders (no network)
- * - SANDBOX/REAL: Admin API when shop + token configured
- * - Never charges; never publishes without explicit call
- * API version target: 2026-07
+ * - MOCK / SANDBOX / REAL
+ * - publish products + create fulfillments with tracking
  */
 
 export type RuntimeMode = 'MOCK' | 'SANDBOX' | 'REAL';
@@ -31,6 +29,23 @@ export interface PublishResult {
   mock: boolean;
   externalId: string;
   adminUrl?: string;
+  error?: string;
+  raw?: unknown;
+}
+
+export interface FulfillmentInput {
+  /** Shopify order id (numeric string) */
+  orderId: string;
+  trackingNumber?: string;
+  trackingCompany?: string;
+  trackingUrl?: string;
+  notifyCustomer?: boolean;
+}
+
+export interface FulfillmentResult {
+  ok: boolean;
+  mock: boolean;
+  fulfillmentId?: string;
   error?: string;
   raw?: unknown;
 }
@@ -71,6 +86,11 @@ function hasCreds() {
   return Boolean(shop && token && token.length > 10 && !token.includes('replace'));
 }
 
+function shopHost() {
+  const shop = shopDomain()!;
+  return shop.includes('.') ? shop : `${shop}.myshopify.com`;
+}
+
 export function getShopifyStatus(): ShopifyStatus {
   const m = mode();
   const configured = hasCreds();
@@ -84,7 +104,7 @@ export function getShopifyStatus(): ShopifyStatus {
     apiVersion: API_VERSION,
     canPublishLive,
     note: canPublishLive
-      ? 'Credenciales presentes — publish usará Admin API'
+      ? 'Credenciales presentes — publish/fulfill usará Admin API'
       : 'Sin shop/token o modo MOCK — publish simulado (MOCK)',
   };
 }
@@ -108,9 +128,8 @@ export async function publishProduct(input: PublishInput): Promise<PublishResult
     };
   }
 
-  const shop = shopDomain()!;
   const token = accessToken();
-  const host = shop.includes('.') ? shop : `${shop}.myshopify.com`;
+  const host = shopHost();
 
   const body = {
     product: {
@@ -167,7 +186,130 @@ export async function publishProduct(input: PublishInput): Promise<PublishResult
   }
 }
 
-/** Simulate a test order for first-sale dry run in MOCK */
+/**
+ * Create a fulfillment on a Shopify order (with optional tracking).
+ * Uses Fulfillment Orders API when possible; falls back to legacy fulfillments.json.
+ */
+export async function createOrderFulfillment(input: FulfillmentInput): Promise<FulfillmentResult> {
+  const status = getShopifyStatus();
+  if (!input.orderId) {
+    return { ok: false, mock: false, error: 'orderId required' };
+  }
+
+  if (!status.canPublishLive) {
+    return {
+      ok: true,
+      mock: true,
+      fulfillmentId: `mock-ff-${Date.now()}`,
+      raw: { simulated: true, ...input },
+    };
+  }
+
+  const token = accessToken();
+  const host = shopHost();
+  const orderId = String(input.orderId).replace(/\D/g, '') || input.orderId;
+
+  try {
+    // 1) List fulfillment orders
+    const foRes = await fetch(
+      `https://${host}/admin/api/${API_VERSION}/orders/${orderId}/fulfillment_orders.json`,
+      {
+        headers: { 'X-Shopify-Access-Token': token! },
+      },
+    );
+    const foData = (await foRes.json()) as any;
+
+    if (foRes.ok && Array.isArray(foData?.fulfillment_orders) && foData.fulfillment_orders.length) {
+      const open = foData.fulfillment_orders.filter(
+        (f: any) => f.status === 'open' || f.status === 'in_progress',
+      );
+      const targets = open.length ? open : foData.fulfillment_orders;
+      const lineItemsByFulfillmentOrder = targets.map((fo: any) => ({
+        fulfillment_order_id: fo.id,
+        fulfillment_order_line_items: (fo.line_items || []).map((li: any) => ({
+          id: li.id,
+          quantity: li.quantity,
+        })),
+      }));
+
+      const body: any = {
+        fulfillment: {
+          line_items_by_fulfillment_order: lineItemsByFulfillmentOrder,
+          notify_customer: input.notifyCustomer !== false,
+          tracking_info: {
+            number: input.trackingNumber || undefined,
+            company: input.trackingCompany || undefined,
+            url: input.trackingUrl || undefined,
+          },
+        },
+      };
+
+      const res = await fetch(`https://${host}/admin/api/${API_VERSION}/fulfillments.json`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Shopify-Access-Token': token!,
+        },
+        body: JSON.stringify(body),
+      });
+      const data = (await res.json()) as any;
+      if (!res.ok) {
+        return {
+          ok: false,
+          mock: false,
+          error: data?.errors ? JSON.stringify(data.errors) : `Shopify fulfill HTTP ${res.status}`,
+          raw: data,
+        };
+      }
+      return {
+        ok: true,
+        mock: false,
+        fulfillmentId: String(data?.fulfillment?.id || ''),
+        raw: data,
+      };
+    }
+
+    // 2) Legacy fallback
+    const legacyBody = {
+      fulfillment: {
+        location_id: undefined,
+        tracking_number: input.trackingNumber,
+        tracking_company: input.trackingCompany,
+        tracking_url: input.trackingUrl,
+        notify_customer: input.notifyCustomer !== false,
+      },
+    };
+    const res = await fetch(
+      `https://${host}/admin/api/${API_VERSION}/orders/${orderId}/fulfillments.json`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Shopify-Access-Token': token!,
+        },
+        body: JSON.stringify(legacyBody),
+      },
+    );
+    const data = (await res.json()) as any;
+    if (!res.ok) {
+      return {
+        ok: false,
+        mock: false,
+        error: data?.errors ? JSON.stringify(data.errors) : `Shopify legacy fulfill HTTP ${res.status}`,
+        raw: data,
+      };
+    }
+    return {
+      ok: true,
+      mock: false,
+      fulfillmentId: String(data?.fulfillment?.id || ''),
+      raw: data,
+    };
+  } catch (e: any) {
+    return { ok: false, mock: false, error: e?.message || 'Error de red Shopify fulfill' };
+  }
+}
+
 export function createMockOrder(productTitle: string, price: number, currency = 'COP'): MockOrder {
   return {
     id: `mock-order-${Date.now()}`,
