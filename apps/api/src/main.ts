@@ -472,8 +472,6 @@ class DiscoveryController {
 }
 
 
-@Controller('jobs')
-
 @Controller('alerts')
 class AlertsController {
   @Get('status')
