@@ -33,6 +33,13 @@ import {
   type DiscoveredCandidate,
 } from '../../../packages/discovery/src/index';
 import { prisma, ProductStatus, ApprovalStatus, RuntimeMode } from '../../../packages/database/src/index';
+import {
+  enqueueDiscovery,
+  enqueuePipeline,
+  listRecentJobs,
+  getQueueStatus,
+  startWorkers,
+} from '../../../packages/queue/src/index';
 
 const MODE = (process.env.ECOM_MODE ?? 'MOCK') as 'MOCK' | 'SANDBOX' | 'REAL';
 const MODE_ENUM = (MODE === 'REAL' ? 'REAL' : MODE === 'SANDBOX' ? 'SANDBOX' : 'MOCK') as RuntimeMode;
@@ -363,11 +370,12 @@ class HealthController {
       service: 'ecom-api',
       mode: MODE,
       timestamp: new Date().toISOString(),
-      block: 10,
+      block: 11,
       aiRouter: true,
       orchestrator: true,
       agentRuns: true,
       discovery: true,
+      queue: true,
       persistence: 'prisma',
       shopify: shopify.canPublishLive ? 'live-ready' : 'mock',
       cj: cj.canFulfillLive ? 'live-ready' : 'mock',
@@ -455,6 +463,84 @@ class DiscoveryController {
       rejectedItems: rejected,
       note: 'Candidatos MOCK etiquetados. runPipeline=true ejecuta orquestador por cada alta nueva.',
     };
+  }
+}
+
+
+@Controller('jobs')
+class JobsController {
+  @Get()
+  async list(@Query('limit') limit = '20') {
+    try {
+      const recent = await listRecentJobs(Number(limit) || 20);
+      return { mode: MODE, ...getQueueStatus(), ...recent };
+    } catch (e: any) {
+      return { mode: MODE, error: e?.message || 'queue_unavailable', items: [] };
+    }
+  }
+
+  @Get('status')
+  status() {
+    return { mode: MODE, ...getQueueStatus() };
+  }
+
+  @Post('discovery')
+  async discovery(
+    @Body()
+    body: {
+      limit?: number;
+      runPipeline?: boolean;
+      onlyPassingFilters?: boolean;
+      includeWeak?: boolean;
+      sync?: boolean;
+    },
+  ) {
+    if (body.sync) {
+      const store = await prisma.store.findFirst();
+      if (!store) return { error: 'no_store' };
+      const found = await discoverCandidates({
+        limit: body.limit ?? 5,
+        includeWeak: Boolean(body.includeWeak),
+      });
+      const onlyPass = body.onlyPassingFilters !== false;
+      const runPipeline = Boolean(body.runPipeline);
+      const created: any[] = [];
+      for (const c of found.items) {
+        const filters = candidatePassesHardFilters(c);
+        if (onlyPass && !filters.ok) continue;
+        const r = await ingestCandidate(store.id, c, runPipeline);
+        if (!r.skipped) created.push({ title: c.title, productId: r.productId });
+      }
+      await writeAudit('JOB_DISCOVERY_SYNC', 'Queue', store.id, { created: created.length });
+      return { mode: MODE, sync: true, created: created.length, items: created };
+    }
+    try {
+      const job = await enqueueDiscovery({
+        limit: body.limit ?? 5,
+        runPipeline: Boolean(body.runPipeline),
+        onlyPassingFilters: body.onlyPassingFilters !== false,
+        includeWeak: Boolean(body.includeWeak),
+      });
+      await writeAudit('JOB_ENQUEUED', 'Queue', String(job.jobId), job);
+      return { mode: MODE, ...job };
+    } catch (e: any) {
+      return { mode: MODE, error: e?.message || 'enqueue_failed' };
+    }
+  }
+
+  @Post('pipeline')
+  async pipelineJob(@Body() body: { productId?: string; skipAiCopy?: boolean }) {
+    if (!body.productId) return { error: 'productId_required' };
+    try {
+      const job = await enqueuePipeline({
+        productId: body.productId,
+        skipAiCopy: body.skipAiCopy !== false,
+      });
+      await writeAudit('JOB_ENQUEUED', 'Queue', String(job.jobId), job);
+      return { mode: MODE, ...job };
+    } catch (e: any) {
+      return { mode: MODE, error: e?.message || 'enqueue_failed' };
+    }
   }
 }
 
@@ -989,6 +1075,7 @@ class AuthController {
   controllers: [
     HealthController,
     DiscoveryController,
+    JobsController,
     AgentsController,
     AgentRunsController,
     OrchestratorController,
@@ -1007,10 +1094,58 @@ class AppModule {}
 
 async function bootstrap() {
   await ensureSeed();
+  try {
+    await startWorkers({
+      onDiscovery: async (data) => {
+        const store = await prisma.store.findFirst();
+        if (!store) return { error: 'no_store' };
+        const found = await discoverCandidates({
+          limit: data.limit ?? 5,
+          includeWeak: Boolean(data.includeWeak),
+        });
+        const onlyPass = data.onlyPassingFilters !== false;
+        const created: any[] = [];
+        for (const c of found.items) {
+          const filters = candidatePassesHardFilters(c);
+          if (onlyPass && !filters.ok) continue;
+          const r = await ingestCandidate(store.id, c, Boolean(data.runPipeline));
+          if (!r.skipped) created.push(r.productId);
+        }
+        await writeAudit('JOB_DISCOVERY_DONE', 'Queue', store.id, { created: created.length });
+        return { created: created.length, ids: created };
+      },
+      onPipeline: async (data) => {
+        const p = await prisma.product.findUnique({
+          where: { id: data.productId },
+          include: { suppliers: { include: { supplier: true }, orderBy: { isPrimary: 'desc' } } },
+        });
+        if (!p) return { error: 'not_found' };
+        const enriched = enrichProduct(p);
+        const result = await runProductPipeline({
+          title: enriched.title,
+          salePrice: enriched.salePrice,
+          productCost: enriched.productCost,
+          shippingCost: enriched.shippingCost,
+          stock: enriched.stock,
+          opportunityScore: enriched.opportunityScore ?? 0,
+          confidence: enriched.confidence ?? 0,
+          supplierName: enriched.supplierName,
+          supplierVerified: enriched.verified,
+          isFirstPublication: enriched.isFirstPublication,
+          currency: enriched.currency,
+          skipAiCopy: data.skipAiCopy !== false,
+        });
+        await saveAgentRun(result, { productId: p.id, storeId: p.storeId });
+        return { status: result.status, traceId: result.traceId };
+      },
+    });
+  } catch (e: any) {
+    console.warn('[queue] workers not started:', e?.message);
+  }
   const app = await NestFactory.create(AppModule);
   app.enableCors({ origin: process.env.APP_URL ?? 'http://localhost:3000' });
   await app.listen(Number(process.env.API_PORT ?? 4000));
-  console.log(`ECOM API block-10 (discovery) on ${process.env.API_PORT ?? 4000} mode=${MODE}`);
+  console.log(`ECOM API block-11 (queue) on ${process.env.API_PORT ?? 4000} mode=${MODE}`);
 }
 
 void bootstrap();
