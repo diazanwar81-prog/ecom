@@ -48,6 +48,15 @@ enum OrderStatus {
   REFUNDED
 }
 
+enum PipelineStatus {
+  RUNNING
+  NEEDS_APPROVAL
+  ELIGIBLE
+  BLOCKED
+  FAILED
+  COMPLETED
+}
+
 model User {
   id           String     @id @default(cuid())
   email        String     @unique
@@ -74,6 +83,7 @@ model Store {
   owner       User        @relation(fields: [ownerId], references: [id])
   products    Product[]
   orders      Order[]
+  agentRuns   AgentRun[]
   createdAt   DateTime    @default(now())
   updatedAt   DateTime    @updatedAt
 }
@@ -98,6 +108,7 @@ model Product {
   suppliers          ProductSupplier[]
   approvals          Approval[]
   priceHistory       PriceChange[]
+  agentRuns          AgentRun[]
   createdAt          DateTime          @default(now())
   updatedAt          DateTime          @updatedAt
 
@@ -127,10 +138,15 @@ model ProductSupplier {
   shippingCost  Decimal? @db.Decimal(12, 2)
   stock         Int?
   isPrimary     Boolean  @default(false)
+  /// CJ Dropshipping variant id (vid)
+  cjVariantId   String?
+  /// CJ variant SKU
+  cjSku         String?
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
   @@unique([productId, supplierId, countryCode])
+  @@index([cjVariantId])
 }
 
 model PriceChange {
@@ -182,6 +198,32 @@ model Order {
 
   @@index([storeId, status])
   @@index([externalId])
+}
+
+/// Multi-agent pipeline execution trace (block 9)
+model AgentRun {
+  id               String         @id @default(cuid())
+  traceId          String         @unique
+  storeId          String?
+  store            Store?         @relation(fields: [storeId], references: [id])
+  productId        String?
+  product          Product?       @relation(fields: [productId], references: [id])
+  productTitle     String
+  status           PipelineStatus
+  marginPercent    Decimal?       @db.Decimal(5, 2)
+  marginBand       String?
+  opportunityScore Int?
+  confidence       Int?
+  canPublish       Boolean        @default(false)
+  needsApproval    Boolean        @default(false)
+  blockedReasons   Json?
+  steps            Json
+  runtimeMode      RuntimeMode    @default(MOCK)
+  createdAt        DateTime       @default(now())
+
+  @@index([productId, createdAt])
+  @@index([status, createdAt])
+  @@index([createdAt])
 }
 
 model AuditLog {
