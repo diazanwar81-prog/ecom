@@ -806,8 +806,6 @@ class AiController {
   }
 }
 
-@Controller('products')
-
 function cleanProductTitle(raw: string): string {
   return String(raw || '')
     .replace(/\[(?:MOCK|SERPER\+CJ|SERPER|CJ)\]\s*/gi, '')
@@ -816,6 +814,7 @@ function cleanProductTitle(raw: string): string {
     .slice(0, 120) || 'Producto ECOM';
 }
 
+@Controller('products')
 class ProductsController {
   constructor(private readonly rules: RulesService) {}
 
