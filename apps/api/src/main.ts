@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { Controller, Get, Module, Injectable, Post, Body, Param, Query, Headers, Req } from '@nestjs/common';
+import { Controller, Get, Module, Injectable, Post, Body, Param, Query, Headers } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import {
   calculateMargin,
@@ -20,6 +20,12 @@ import {
   createMockOrder,
 } from '../../../packages/shopify/src/index';
 import { getCjStatus, fulfillOrder } from '../../../packages/cj/src/index';
+import {
+  runProductPipeline,
+  getOrchestratorMeta,
+  listAgents,
+  type CandidateInput,
+} from '../../../packages/orchestrator/src/index';
 import { prisma, ProductStatus, ApprovalStatus, RuntimeMode } from '../../../packages/database/src/index';
 
 const MODE = (process.env.ECOM_MODE ?? 'MOCK') as 'MOCK' | 'SANDBOX' | 'REAL';
@@ -221,8 +227,9 @@ class HealthController {
       service: 'ecom-api',
       mode: MODE,
       timestamp: new Date().toISOString(),
-      block: 7,
+      block: 8,
       aiRouter: true,
+      orchestrator: true,
       persistence: 'prisma',
       shopify: shopify.canPublishLive ? 'live-ready' : 'mock',
       cj: cj.canFulfillLive ? 'live-ready' : 'mock',
@@ -233,6 +240,49 @@ class HealthController {
   @Get('rules')
   rules() {
     return { mode: MODE, rules: RULES };
+  }
+}
+
+@Controller('agents')
+class AgentsController {
+  @Get()
+  list() {
+    return { mode: MODE, ...getOrchestratorMeta() };
+  }
+}
+
+@Controller('orchestrator')
+class OrchestratorController {
+  @Get('status')
+  status() {
+    return getOrchestratorMeta();
+  }
+
+  /** Evaluate a candidate without persisting (dry-run pipeline) */
+  @Post('run')
+  async run(@Body() body: CandidateInput & { skipAiCopy?: boolean }) {
+    const result = await runProductPipeline({
+      title: body.title || 'Candidato',
+      salePrice: Number(body.salePrice) || 0,
+      productCost: Number(body.productCost) || 0,
+      shippingCost: Number(body.shippingCost) || 0,
+      stock: body.stock ?? null,
+      opportunityScore: body.opportunityScore ?? 60,
+      confidence: body.confidence ?? 80,
+      supplierName: body.supplierName,
+      supplierVerified: body.supplierVerified !== false,
+      isFirstPublication: body.isFirstPublication !== false,
+      countryCode: body.countryCode || 'CO',
+      currency: body.currency || 'COP',
+      facts: body.facts,
+      skipAiCopy: body.skipAiCopy !== false, // default skip AI for speed unless false
+    });
+    await writeAudit('ORCHESTRATOR_RUN', 'Orchestrator', result.traceId, {
+      status: result.status,
+      title: result.productTitle,
+      margin: result.marginPercent,
+    });
+    return { mode: MODE, result };
   }
 }
 
@@ -289,7 +339,6 @@ class ShopifyController {
     return { mode: MODE, order, mock: true };
   }
 
-  /** Webhook orders/create — HMAC verification optional until SHOPIFY_WEBHOOK_SECRET set */
   @Post('webhooks/orders')
   async ordersWebhook(
     @Body() body: any,
@@ -300,7 +349,6 @@ class ShopifyController {
     if (secret && !hmac) {
       return { error: 'missing_hmac' };
     }
-    // Full HMAC verify can be added with raw body middleware; log presence for now
     if (secret && hmac) {
       await writeAudit('SHOPIFY_WEBHOOK_HMAC_PRESENT', 'Shopify', topic || 'orders', {
         hmacPrefix: hmac.slice(0, 8),
@@ -398,7 +446,7 @@ class OrdersController {
       order: updated,
       cj: result,
       note: result.mock
-        ? 'Fulfillment MOCK — sin pedido real a CJ. Configura CJ_API_KEY + SANDBOX para live.'
+        ? 'Fulfillment MOCK — sin pedido real a CJ.'
         : 'Fulfillment enviado a CJ',
     };
   }
@@ -457,6 +505,60 @@ class ProductsController {
     });
     if (!p) return { error: 'not_found', mode: MODE };
     return { mode: MODE, item: enrichProduct(p) };
+  }
+
+  /** Run multi-agent pipeline on an existing product */
+  @Post(':id/pipeline')
+  async pipeline(@Param('id') id: string, @Body() body: { skipAiCopy?: boolean }) {
+    const p = await prisma.product.findUnique({
+      where: { id },
+      include: { suppliers: { include: { supplier: true }, orderBy: { isPrimary: 'desc' } } },
+    });
+    if (!p) return { error: 'not_found' };
+    const enriched = enrichProduct(p);
+    const result = await runProductPipeline({
+      title: enriched.title,
+      salePrice: enriched.salePrice,
+      productCost: enriched.productCost,
+      shippingCost: enriched.shippingCost,
+      stock: enriched.stock,
+      opportunityScore: enriched.opportunityScore ?? 0,
+      confidence: enriched.confidence ?? 0,
+      supplierName: enriched.supplierName,
+      supplierVerified: enriched.verified,
+      isFirstPublication: enriched.isFirstPublication,
+      currency: enriched.currency,
+      skipAiCopy: body?.skipAiCopy !== false,
+    });
+
+    if (result.suggestedDescription) {
+      await prisma.product.update({
+        where: { id },
+        data: {
+          description: result.suggestedDescription.slice(0, 4000),
+          marginPercent: result.marginPercent,
+          status:
+            result.status === 'BLOCKED'
+              ? 'REJECTED'
+              : result.status === 'NEEDS_APPROVAL'
+                ? 'PENDING_APPROVAL'
+                : p.status,
+        },
+      });
+    } else {
+      await prisma.product.update({
+        where: { id },
+        data: { marginPercent: result.marginPercent },
+      });
+    }
+
+    await writeAudit('PRODUCT_PIPELINE', 'Product', id, {
+      status: result.status,
+      traceId: result.traceId,
+      margin: result.marginPercent,
+    });
+
+    return { mode: MODE, productId: id, result };
   }
 
   @Post(':id/evaluate')
@@ -633,6 +735,8 @@ class AuthController {
 @Module({
   controllers: [
     HealthController,
+    AgentsController,
+    OrchestratorController,
     CjController,
     ShopifyController,
     OrdersController,
@@ -651,7 +755,7 @@ async function bootstrap() {
   const app = await NestFactory.create(AppModule);
   app.enableCors({ origin: process.env.APP_URL ?? 'http://localhost:3000' });
   await app.listen(Number(process.env.API_PORT ?? 4000));
-  console.log(`ECOM API block-7 (CJ+Shopify) on ${process.env.API_PORT ?? 4000} mode=${MODE}`);
+  console.log(`ECOM API block-8 (orchestrator) on ${process.env.API_PORT ?? 4000} mode=${MODE}`);
 }
 
 void bootstrap();
