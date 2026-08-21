@@ -336,8 +336,9 @@ export default function Home() {
                 <button type="button" onClick={() => runPipeline(p.id)} style={{ cursor: 'pointer' }}>Pipeline</button>
                 <button type="button" onClick={() => requestApproval(p.id)} style={{ cursor: 'pointer' }}>Pedir aprobación</button>
                 <button type="button" onClick={() => generateCopy(p.id)} style={{ cursor: 'pointer' }}>Copy IA</button>
-                <button type="button" onClick={() => goLive(p.id)} style={{ cursor: 'pointer', background: '#16a34a', color: '#fff', border: 'none', padding: '4px 10px', borderRadius: 4 }}>Aprobar y publicar</button>
-                <button type="button" onClick={() => publish(p.id) style={{ cursor: 'pointer' }}>Publicar</button>
+                <button type="button" onClick={() => goLive(p.id)} style={{ cursor: 'pointer', background: '#16a34a', color: '#fff', border: 'none', borderRadius: 4, padding: '4px 8px' }}>Go-live</button>
+                <button type="button" onClick={() => publish(p.id)} style={{ cursor: 'pointer' }}>Publicar</button>
+                <button type="button" onClick={() => syncInventory(p.id)} style={{ cursor: 'pointer' }}>Sync stock</button>
               </div>
             </article>
           ))}
