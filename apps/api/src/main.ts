@@ -87,6 +87,19 @@ import {
   testWebhookHmac,
   REAL_CLOSE_META,
 } from '../../../packages/real-close/src/index';
+import {
+  cleanCommercialTitle,
+  titleQualityScore,
+  strictCjGate,
+  countOrphanPublished,
+  priceFromUsdCost,
+  marginAfterFees,
+  approvalQueuePolicy,
+  verifyCatalogQuality,
+  summarizeQuality,
+  CATALOG_QUALITY_META,
+} from '../../../packages/catalog-quality/src/index';
+
 
 
 import {
@@ -531,7 +544,7 @@ class HealthController {
       service: 'ecom-api',
       mode: MODE,
       timestamp: new Date().toISOString(),
-      block: 40,
+      block: 44,
       aiRouter: true,
       orchestrator: true,
       agentRuns: true,
@@ -2018,7 +2031,7 @@ class DashboardController {
     ];
     return {
       mode: process.env.ECOM_MODE || 'MOCK',
-      block: 40,
+      block: 44,
       kpis: {
         published,
         pendingApproval: pending,
@@ -2116,7 +2129,7 @@ class AnalyticsController {
     for (const p of products) byStatus[p.status] = (byStatus[p.status] || 0) + 1;
     return {
       mode: process.env.ECOM_MODE || 'MOCK',
-      block: 40,
+      block: 44,
       products: products.length,
       orders: orders.length,
       revenue,
@@ -2131,7 +2144,7 @@ class AnalyticsController {
   ) {
     return {
       mode: process.env.ECOM_MODE || 'MOCK',
-      block: 40,
+      block: 44,
       ...realizedMargin(body),
     };
   }
@@ -2154,7 +2167,7 @@ class AnalyticsController {
       productCost: body.productCost,
       shippingCost: body.shippingCost,
     });
-    return { mode: process.env.ECOM_MODE || 'MOCK', block: 40, ...result };
+    return { mode: process.env.ECOM_MODE || 'MOCK', block: 44, ...result };
   }
 
   @Post('underperformance')
@@ -2176,7 +2189,7 @@ class AnalyticsController {
       revenue: related.reduce((a, o) => a + Number(o.total || 0), 0),
       daysSincePublish: days,
     }, { minDays: body.minDays });
-    return { mode: process.env.ECOM_MODE || 'MOCK', block: 40, productId: p.id, days, orders: related.length, decision };
+    return { mode: process.env.ECOM_MODE || 'MOCK', block: 44, productId: p.id, days, orders: related.length, decision };
   }
 }
 
@@ -2302,12 +2315,12 @@ class DeployController {
   @Get('readiness')
   readiness() {
     const result = productionReadiness(process.env as any);
-    return { mode: process.env.ECOM_MODE || 'MOCK', block: 40, ...result };
+    return { mode: process.env.ECOM_MODE || 'MOCK', block: 44, ...result };
   }
 
   @Get('ci-hints')
   ci() {
-    return { mode: process.env.ECOM_MODE || 'MOCK', block: 40, steps: ciPipelineHint() };
+    return { mode: process.env.ECOM_MODE || 'MOCK', block: 44, steps: ciPipelineHint() };
   }
 }
 
@@ -2386,7 +2399,7 @@ class RealCloseController {
     const summary = summarizeVerification(items);
     return {
       mode: process.env.ECOM_MODE || 'MOCK',
-      block: 40,
+      block: 44,
       ...summary,
       inventoryDryRun: { toPause: inv.toPause, sample: inv.results.slice(0, 5) },
       nextActions: summary.ok
@@ -2457,12 +2470,191 @@ class RealCloseController {
       };
     });
     await writeAudit('TRACKING_SCAN', 'Order', 'batch', { count: items.length });
-    return { mode: process.env.ECOM_MODE || 'MOCK', block: 40, count: items.length, items };
+    return { mode: process.env.ECOM_MODE || 'MOCK', block: 44, count: items.length, items };
+  }
+}
+
+
+@Controller('catalog')
+class CatalogQualityController {
+  @Get('meta')
+  meta() {
+    return { mode: process.env.ECOM_MODE || 'MOCK', ...CATALOG_QUALITY_META };
+  }
+
+  @Get('verify')
+  async verify() {
+    const products = await prisma.product.findMany({
+      take: 300,
+      include: { suppliers: true },
+    });
+    const published = products.filter((p) => p.status === 'PUBLISHED');
+    const pending = products.filter((p) => p.status === 'PENDING_APPROVAL');
+    const orphan = countOrphanPublished(products as any);
+
+    const titles = published.map((p) => p.title);
+    // sample margin on first published with supplier costs
+    let sampleMarginOk = true;
+    let sampleMarginPct: number | undefined;
+    const sample = published.find((p) => (p.suppliers || []).length > 0);
+    if (sample) {
+      const s = sample.suppliers[0] as any;
+      const sale = Number(sample.salePrice || 0);
+      const cost = Number(s.productCost || 0);
+      const ship = Number(s.shippingCost || 0);
+      if (sale > 0) {
+        const m = marginAfterFees({
+          salePrice: sale,
+          productCost: cost,
+          shippingCost: ship,
+        });
+        sampleMarginOk = m.ok;
+        sampleMarginPct = m.marginPct;
+      }
+    }
+
+    const items = verifyCatalogQuality({
+      publishedTitles: titles,
+      orphanPublished: orphan.orphans,
+      published: orphan.published,
+      pendingApproval: pending.length,
+      sampleMarginOk,
+      sampleMarginPct,
+    });
+    const summary = summarizeQuality(items);
+    return {
+      mode: process.env.ECOM_MODE || 'MOCK',
+      block: 44,
+      ...summary,
+      orphan,
+      pendingApproval: pending.length,
+      nextActions: summary.ok
+        ? ['Opcional: POST /catalog/clean-titles dryRun',
+           'Revisar PENDING_APPROVAL y go-live selectivo']
+        : summary.items.filter((i) => !i.ok).map((i) => i.message),
+    };
+  }
+
+  @Post('clean-title')
+  cleanOne(@Body() body: { title?: string }) {
+    const raw = body?.title || '';
+    const q = titleQualityScore(raw);
+    return {
+      mode: process.env.ECOM_MODE || 'MOCK',
+      block: 41,
+      raw,
+      ...q,
+    };
+  }
+
+  @Post('clean-titles')
+  async cleanTitles(@Body() body: { dryRun?: boolean; limit?: number }) {
+    const dryRun = body?.dryRun !== false;
+    const limit = Math.min(Number(body?.limit || 50), 100);
+    const products = await prisma.product.findMany({
+      where: { status: { in: ['PUBLISHED', 'PENDING_APPROVAL', 'DRAFT'] } },
+      take: limit,
+      orderBy: { updatedAt: 'desc' },
+    });
+    const changes: { id: string; from: string; to: string; score: number }[] = [];
+    for (const p of products) {
+      const q = titleQualityScore(p.title);
+      if (q.cleaned && q.cleaned !== p.title && q.score < 85) {
+        changes.push({ id: p.id, from: p.title, to: q.cleaned, score: q.score });
+        if (!dryRun) {
+          await prisma.product.update({
+            where: { id: p.id },
+            data: { title: q.cleaned },
+          });
+          await writeAudit('TITLE_CLEANED', 'Product', p.id, {
+            from: p.title,
+            to: q.cleaned,
+          });
+        }
+      }
+    }
+    return {
+      mode: process.env.ECOM_MODE || 'MOCK',
+      block: 41,
+      dryRun,
+      scanned: products.length,
+      changes: changes.length,
+      items: changes.slice(0, 30),
+    };
+  }
+
+  @Post('cj-gate')
+  async cjGate(@Body() body: { productId: string }) {
+    const p = await prisma.product.findUnique({
+      where: { id: body.productId },
+      include: { suppliers: true },
+    });
+    if (!p) return { error: 'not_found' };
+    const s = (p.suppliers || []).find((x: any) => x.isPrimary) || p.suppliers[0];
+    const gate = strictCjGate({
+      status: p.status,
+      cjVariantId: s?.cjVariantId,
+      cjSku: s?.cjSku,
+      stock: s?.stock,
+      verified: true,
+    });
+    return { mode: process.env.ECOM_MODE || 'MOCK', block: 42, productId: p.id, gate, supplier: s };
+  }
+
+  @Post('price-cop')
+  priceCop(
+    @Body()
+    body: {
+      productCostUsd: number;
+      shippingUsd?: number;
+      targetMarginPct?: number;
+    },
+  ) {
+    const result = priceFromUsdCost({
+      productCostUsd: Number(body?.productCostUsd || 0),
+      shippingUsd: body?.shippingUsd,
+      targetMarginPct: body?.targetMarginPct,
+    });
+    return { mode: process.env.ECOM_MODE || 'MOCK', block: 43, ...result };
+  }
+
+  @Post('margin-check')
+  marginCheck(
+    @Body()
+    body: {
+      salePrice: number;
+      productCost: number;
+      shippingCost: number;
+    },
+  ) {
+    const m = marginAfterFees({
+      salePrice: Number(body.salePrice),
+      productCost: Number(body.productCost),
+      shippingCost: Number(body.shippingCost),
+    });
+    return { mode: process.env.ECOM_MODE || 'MOCK', block: 43, ...m };
+  }
+
+  @Post('approval-policy')
+  approvalPolicy(
+    @Body()
+    body: {
+      createdToday?: number;
+      confidence?: number;
+      isFirstPublication?: boolean;
+    },
+  ) {
+    const policy = approvalQueuePolicy({
+      createdToday: Number(body?.createdToday || 0),
+      confidence: Number(body?.confidence || 80),
+      isFirstPublication: body?.isFirstPublication,
+    });
+    return { mode: process.env.ECOM_MODE || 'MOCK', block: 44, policy };
   }
 }
 
 @Module({
-  controllers: [RealCloseController, SeoController, AdsController, DeployController, TrendsController, MarketingController, AnalyticsController, ScoringController, ContentController, DashboardController, OpsController, 
+  controllers: [CatalogQualityController, RealCloseController, SeoController, AdsController, DeployController, TrendsController, MarketingController, AnalyticsController, ScoringController, ContentController, DashboardController, OpsController, 
     HealthController,
     DiscoveryController,
     JobsController,
@@ -2535,7 +2727,7 @@ async function bootstrap() {
   }
   try {
     startDiscoveryScheduler();
-  void alertOps('BOOT', { service: 'ecom-api', block: 40 });
+  void alertOps('BOOT', { service: 'ecom-api', block: 44 });
   } catch (e: any) {
     console.warn('[queue] scheduler not started:', e?.message);
   }
