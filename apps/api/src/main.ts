@@ -507,7 +507,11 @@ class DiscoveryController {
 class AlertsController {
   @Get('stock-risks')
   async stockRisks() {
-    const items = await prisma.product.findMany({ orderBy: { updatedAt: 'desc' }, take: 50 });
+    const items = await prisma.product.findMany({
+      orderBy: { updatedAt: 'desc' },
+      take: 50,
+      include: { suppliers: { include: { supplier: true } } },
+    });
     const risks: any[] = [];
     for (const p of items) {
       const enriched = enrichProduct(p);
