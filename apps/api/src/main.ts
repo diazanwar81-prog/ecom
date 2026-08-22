@@ -128,21 +128,53 @@ async function ensureSupplierByName(name: string, verified: boolean) {
   return prisma.supplier.create({ data: { name, verified } });
 }
 
+function normTitleKey(title: string) {
+  return String(title || '')
+    .replace(/\[(?:MOCK|SERPER\+CJ|SERPER|CJ)\]\s*/gi, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 80);
+}
+
 async function ingestCandidate(storeId: string, c: DiscoveredCandidate, runPipeline: boolean) {
-  // Dedupe by cjSku or exact title
+  // Never recreate if SKU / variant already linked (any status, incl. PUBLISHED)
   if (c.cjSku) {
     const bySku = await prisma.product.findFirst({
       where: { storeId, suppliers: { some: { cjSku: c.cjSku } } },
     });
     if (bySku) {
-      return { productId: bySku.id, created: false, pipeline: null as any, skipped: true };
+      return { productId: bySku.id, created: false, pipeline: null as any, skipped: true, reason: 'sku_exists' };
     }
   }
-  const existing = await prisma.product.findFirst({
+  if (c.cjVariantId) {
+    const byVid = await prisma.product.findFirst({
+      where: { storeId, suppliers: { some: { cjVariantId: c.cjVariantId } } },
+    });
+    if (byVid) {
+      return { productId: byVid.id, created: false, pipeline: null as any, skipped: true, reason: 'vid_exists' };
+    }
+  }
+  const existingExact = await prisma.product.findFirst({
     where: { storeId, title: c.title },
   });
-  if (existing) {
-    return { productId: existing.id, created: false, pipeline: null as any, skipped: true };
+  if (existingExact) {
+    return { productId: existingExact.id, created: false, pipeline: null as any, skipped: true, reason: 'title_exact' };
+  }
+  // Fuzzy: same normalized title (covers cleaned publish titles vs discovery titles)
+  const key = normTitleKey(c.title);
+  if (key) {
+    const recent = await prisma.product.findMany({
+      where: { storeId },
+      select: { id: true, title: true, status: true, externalId: true },
+      orderBy: { createdAt: 'desc' },
+      take: 400,
+    });
+    const hit = recent.find((p) => normTitleKey(p.title) === key);
+    if (hit) {
+      return { productId: hit.id, created: false, pipeline: null as any, skipped: true, reason: 'title_norm' };
+    }
   }
 
   const supplier = await ensureSupplierByName(c.supplierName, c.supplierVerified);
@@ -1237,10 +1269,27 @@ class ProductsController {
     return { mode: MODE, item: { ...enriched, marginPercent: margin.marginPercent, marginBand: margin.band } };
   }
 
-  @Post(':id/request-approval')
+    @Post(':id/request-approval')
   async requestApproval(@Param('id') id: string, @Body() body: { action: string; reason?: string }) {
     const p = await prisma.product.findUnique({ where: { id } });
     if (!p) return { error: 'not_found' };
+    // Do not re-queue published / already live products
+    if (p.status === 'PUBLISHED' || p.externalId || p.isFirstPublication === false) {
+      return {
+        error: 'already_published_or_linked',
+        reason: 'Producto ya publicado o vinculado a Shopify; no requiere nueva aprobación',
+        productId: id,
+        status: p.status,
+        externalId: p.externalId,
+      };
+    }
+    const pending = await prisma.approval.findFirst({
+      where: { productId: id, status: 'PENDING' },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (pending) {
+      return { mode: MODE, approval: pending, duplicate: true, note: 'Ya hay solicitud PENDING' };
+    }
     const admin = await prisma.user.findFirst({ where: { email: 'admin@ecom.local' } });
     const action = body.action || 'FIRST_PUBLICATION';
     const approval = await prisma.approval.create({
