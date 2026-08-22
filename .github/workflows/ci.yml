@@ -1,0 +1,33 @@
+name: ECOM CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  workspace:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Install
+        run: pnpm install --frozen-lockfile || pnpm install
+      - name: Typecheck packages exist
+        run: |
+          test -f packages/rules/src/index.ts
+          test -f packages/scoring/src/index.ts
+          test -f packages/seo/src/index.ts
+          test -f packages/ads/src/index.ts
+          test -f packages/deploy/src/index.ts
+      - name: CI hints
+        run: |
+          echo "Run docker compose locally for full e2e"
+          echo "Never commit real secrets"
