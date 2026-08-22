@@ -12,19 +12,26 @@ export type QualityItem = {
   data?: Record<string, unknown>;
 };
 
-const JUNK_TITLE_RE =
-  /\b(cross[- ]?border|dropshipping|hot[- ]?selling|wholesale|factory|oem|odm|export)\b/gi;
+const JUNK_TITLE_PATTERN =
+  '(cross[- ]?border|dropshipping|hot[- ]?selling|wholesale|factory|oem|odm|export)';
+
+function junkTitleRe(): RegExp {
+  return new RegExp(`\\b${JUNK_TITLE_PATTERN}\\b`, 'gi');
+}
+
+function hasJunkTitle(title: string): boolean {
+  return junkTitleRe().test(title);
+}
 
 /** Block 41: clean commercial title */
 export function cleanCommercialTitle(raw: string, maxLen = 70): string {
   let t = String(raw || '')
-    .replace(JUNK_TITLE_RE, ' ')
+    .replace(junkTitleRe(), ' ')
     .replace(/\[[^\]]*\]/g, ' ')
-    .replace(/[|]//g, ' ')
+    .replace(/\|/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
   if (!t) t = 'Producto';
-  // Capitalize first letter
   t = t.charAt(0).toUpperCase() + t.slice(1);
   if (t.length > maxLen) t = t.slice(0, maxLen - 1).trim() + '…';
   return t;
@@ -38,7 +45,7 @@ export function titleQualityScore(title: string): {
   const issues: string[] = [];
   let score = 100;
   const cleaned = cleanCommercialTitle(title);
-  if (JUNK_TITLE_RE.test(title)) {
+  if (hasJunkTitle(title)) {
     score -= 40;
     issues.push('contiene_jerga_dropshipping');
   }
@@ -108,9 +115,6 @@ export function priceFromUsdCost(input: {
   const target = input.targetMarginPct ?? 40;
 
   const landed = (input.productCostUsd + ship) * fx;
-  // price such that after fees+reserve we keep target margin on landed
-  // sale * (1 - fee - ret) - landed >= sale * target/100
-  // sale * (1 - fee/100 - ret/100 - target/100) >= landed
   const keep = 1 - feePct / 100 - retPct / 100 - target / 100;
   const sale = keep > 0.05 ? Math.ceil(landed / keep) : Math.ceil(landed * 2);
   const net = sale * (1 - feePct / 100 - retPct / 100);
@@ -201,12 +205,12 @@ export function verifyCatalogQuality(input: {
 }): QualityItem[] {
   const items: QualityItem[] = [];
 
-  // 41 title quality on published sample
   let junk = 0;
+  const sampleN = Math.min(30, input.publishedTitles.length);
   for (const t of input.publishedTitles.slice(0, 30)) {
     if (titleQualityScore(t).score < 60) junk++;
   }
-  const titleOk = input.publishedTitles.length === 0 || junk / Math.max(1, Math.min(30, input.publishedTitles.length)) <= 0.5;
+  const titleOk = sampleN === 0 || junk / Math.max(1, sampleN) <= 0.5;
   items.push({
     id: 'title_quality_sample',
     block: 41,
@@ -218,7 +222,6 @@ export function verifyCatalogQuality(input: {
     data: { junk, sample: input.publishedTitles.length },
   });
 
-  // 42 no orphan published
   items.push({
     id: 'no_orphan_published',
     block: 42,
@@ -231,7 +234,6 @@ export function verifyCatalogQuality(input: {
     data: { orphanPublished: input.orphanPublished, published: input.published },
   });
 
-  // 43 margin after fees sample
   items.push({
     id: 'margin_after_fees_policy',
     block: 43,
@@ -243,7 +245,6 @@ export function verifyCatalogQuality(input: {
     data: { sampleMarginPct: input.sampleMarginPct },
   });
 
-  // 44 approval queue exists / policy alive
   items.push({
     id: 'approval_queue_policy',
     block: 44,
