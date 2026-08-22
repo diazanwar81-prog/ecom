@@ -420,7 +420,7 @@ class HealthController {
       service: 'ecom-api',
       mode: MODE,
       timestamp: new Date().toISOString(),
-      block: 25,
+      block: 26,
       aiRouter: true,
       orchestrator: true,
       agentRuns: true,
@@ -1553,7 +1553,49 @@ class ApprovalsController {
   @Get()
   async list(@Query('status') status?: string) {
     const where = status ? { status: status as ApprovalStatus } : {};
-    const items = await prisma.approval.findMany({ where, orderBy: { createdAt: 'desc' }, take: 100 });
+    const rows = await prisma.approval.findMany({
+      where,
+      orderBy: { createdAt: 'desc' },
+      take: 100,
+      include: {
+        product: {
+          include: {
+            suppliers: { include: { supplier: true }, orderBy: { isPrimary: 'desc' }, take: 1 },
+          },
+        },
+      },
+    });
+    const items = rows.map((a) => {
+      const enriched = a.product ? enrichProduct(a.product) : null;
+      return {
+        id: a.id,
+        productId: a.productId,
+        action: a.action,
+        reason: a.reason,
+        status: a.status,
+        createdAt: a.createdAt,
+        decidedAt: a.decidedAt,
+        product: enriched
+          ? {
+              id: enriched.id,
+              title: enriched.title,
+              status: enriched.status,
+              marginPercent: enriched.marginPercent,
+              marginBand: enriched.marginBand,
+              opportunityScore: enriched.opportunityScore,
+              confidence: enriched.confidence,
+              salePrice: enriched.salePrice,
+              currency: enriched.currency,
+              stock: enriched.stock,
+              supplierName: enriched.supplierName,
+              verified: enriched.verified,
+              cjSku: enriched.cjSku,
+              canPublish: enriched.canPublish,
+              shouldPause: enriched.shouldPause,
+            }
+          : null,
+      };
+    });
     return { mode: MODE, count: items.length, items };
   }
 
@@ -1688,7 +1730,7 @@ async function bootstrap() {
   }
   try {
     startDiscoveryScheduler();
-  void alertOps('BOOT', { service: 'ecom-api', block: 25 });
+  void alertOps('BOOT', { service: 'ecom-api', block: 26 });
   } catch (e: any) {
     console.warn('[queue] scheduler not started:', e?.message);
   }

@@ -29,6 +29,23 @@ type Approval = {
   reason: string;
   status: string;
   createdAt: string;
+  product?: {
+    id: string;
+    title: string;
+    status: string;
+    marginPercent?: number;
+    marginBand?: string;
+    opportunityScore?: number;
+    confidence?: number;
+    salePrice?: number;
+    currency?: string;
+    stock?: number;
+    supplierName?: string;
+    verified?: boolean;
+    cjSku?: string | null;
+    canPublish?: boolean;
+    shouldPause?: boolean;
+  } | null;
 };
 
 const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000';
@@ -239,6 +256,9 @@ export default function Home() {
     await load();
   }
 
+  const pendingApprovals = approvals.filter((a) => a.status === 'PENDING');
+  const pendingProducts = products.filter((p) => p.status === 'PENDING_APPROVAL');
+
   const bandColor = (b?: string) => {
     if (b === 'IDEAL') return '#16a34a';
     if (b === 'OPERATIONAL') return '#2563eb';
@@ -251,7 +271,7 @@ export default function Home() {
     <main style={{ fontFamily: 'system-ui, sans-serif', margin: '0 auto', maxWidth: 1120, padding: '1.5rem' }}>
       <header style={{ marginBottom: '1.25rem' }}>
         <p style={{ color: '#64748b', margin: 0 }}>ECOM · Panel operativo</p>
-        <h1 style={{ margin: '0.25rem 0' }}>Bloque {block ?? '—'} · Ops: pedidos · stock · fulfill</h1>
+        <h1 style={{ margin: '0.25rem 0' }}>Bloque {block ?? '—'} · Ops: aprobaciones · pedidos · publish</h1>
         <p>
           Modo: <strong style={{ color: mode === 'MOCK' ? '#ca8a04' : '#16a34a' }}>{mode}</strong>
           {' · '}
@@ -373,22 +393,108 @@ export default function Home() {
         </div>
       </section>
 
-      <h2>Aprobaciones</h2>
-        {approvals.length === 0 && <p style={{ color: '#64748b' }}>Sin solicitudes.</p>}
-        <div style={{ display: 'grid', gap: 8 }}>
-          {approvals.map((a) => (
-            <div key={a.id} style={{ border: '1px solid #e2e8f0', borderRadius: 8, padding: 10 }}>
-              <strong>{a.action}</strong> · {a.status}
-              <div style={{ fontSize: 13, color: '#64748b' }}>{a.reason}</div>
-              {a.status === 'PENDING' && (
-                <div style={{ marginTop: 6, display: 'flex', gap: 8 }}>
-                  <button type="button" onClick={() => decide(a.id, 'APPROVED')} style={{ cursor: 'pointer' }}>Aprobar</button>
-                  <button type="button" onClick={() => decide(a.id, 'REJECTED')} style={{ cursor: 'pointer' }}>Rechazar</button>
+      <section style={{ marginBottom: '1.75rem', background: '#fff7ed', border: '1px solid #fed7aa', borderRadius: 10, padding: '1rem' }}>
+        <h2 style={{ marginTop: 0 }}>Panel de aprobaciones</h2>
+        <p style={{ fontSize: 13, color: '#9a3412' }}>
+          Pendientes: <strong>{pendingApprovals.length}</strong> solicitudes ·{" "}
+          <strong>{pendingProducts.length}</strong> productos en PENDING_APPROVAL
+        </p>
+
+        <h3 style={{ fontSize: 15 }}>Solicitudes PENDING</h3>
+        {pendingApprovals.length === 0 && (
+          <p style={{ color: '#64748b', fontSize: 13 }}>No hay solicitudes pendientes.</p>
+        )}
+        <div style={{ display: 'grid', gap: 10 }}>
+          {pendingApprovals.map((a) => (
+            <div key={a.id} style={{ background: '#fff', border: '1px solid #fdba74', borderRadius: 8, padding: 12 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
+                <div>
+                  <strong>{a.product?.title || a.action}</strong>
+                  <div style={{ fontSize: 12, color: '#64748b' }}>
+                    {a.action} · {a.reason}
+                  </div>
+                  {a.product && (
+                    <div style={{ fontSize: 12, marginTop: 4 }}>
+                      margen{' '}
+                      <span style={{ color: bandColor(a.product.marginBand), fontWeight: 600 }}>
+                        {a.product.marginPercent}% ({a.product.marginBand})
+                      </span>
+                      {' · '}score {a.product.opportunityScore} · conf {a.product.confidence}%
+                      {' · '}stock {a.product.stock ?? '—'}
+                      {' · '}{a.product.supplierName}
+                      {a.product.cjSku ? ` · SKU ${a.product.cjSku}` : ''}
+                    </div>
+                  )}
                 </div>
-              )}
+                <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start', flexWrap: 'wrap' }}>
+                  <button
+                    type="button"
+                    onClick={() => decide(a.id, 'APPROVED')}
+                    style={{ cursor: 'pointer', background: '#2563eb', color: '#fff', border: 'none', borderRadius: 6, padding: '6px 10px' }}
+                  >
+                    Solo aprobar
+                  </button>
+                  {a.productId && (
+                    <button
+                      type="button"
+                      onClick={() => goLive(a.productId!)}
+                      style={{ cursor: 'pointer', background: '#16a34a', color: '#fff', border: 'none', borderRadius: 6, padding: '6px 10px' }}
+                    >
+                      Aprobar y publicar
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => decide(a.id, 'REJECTED')}
+                    style={{ cursor: 'pointer', background: '#dc2626', color: '#fff', border: 'none', borderRadius: 6, padding: '6px 10px' }}
+                  >
+                    Rechazar
+                  </button>
+                </div>
+              </div>
             </div>
           ))}
         </div>
+
+        <h3 style={{ fontSize: 15, marginTop: 16 }}>Productos PENDING_APPROVAL (acceso directo)</h3>
+        <div style={{ display: 'grid', gap: 8 }}>
+          {pendingProducts.map((p) => (
+            <div key={p.id} style={{ background: '#fff', border: '1px solid #e2e8f0', borderRadius: 8, padding: 10, display: 'flex', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
+              <div style={{ fontSize: 13 }}>
+                <strong>{p.title}</strong>
+                <div style={{ color: '#64748b' }}>
+                  margen {p.marginPercent}% ({p.marginBand}) · score {p.opportunityScore} · conf {p.confidence}%
+                </div>
+              </div>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button type="button" onClick={() => requestApproval(p.id)} style={{ cursor: 'pointer' }}>
+                  Crear solicitud
+                </button>
+                <button
+                  type="button"
+                  onClick={() => goLive(p.id)}
+                  style={{ cursor: 'pointer', background: '#16a34a', color: '#fff', border: 'none', borderRadius: 6, padding: '6px 10px' }}
+                >
+                  Go-live
+                </button>
+              </div>
+            </div>
+          ))}
+          {pendingProducts.length === 0 && (
+            <p style={{ color: '#64748b', fontSize: 13 }}>Ningún producto en PENDING_APPROVAL.</p>
+          )}
+        </div>
+
+        <details style={{ marginTop: 12 }}>
+          <summary style={{ cursor: 'pointer', fontSize: 13 }}>Historial de aprobaciones ({approvals.length})</summary>
+          <ul style={{ fontSize: 12, color: '#475569' }}>
+            {approvals.map((a) => (
+              <li key={a.id}>
+                {a.createdAt} · {a.status} · {a.action} · {a.product?.title || a.productId || '—'}
+              </li>
+            ))}
+          </ul>
+        </details>
       </section>
 
       <section style={{ marginBottom: '1.75rem' }}>
@@ -426,7 +532,7 @@ export default function Home() {
       </section>
 
       <footer style={{ marginTop: '2rem', fontSize: 12, color: '#94a3b8' }}>
-        Discovery MOCK/Serper · Orchestrator · AgentRun · BullMQ · Shopify/CJ live-ready. Presupuesto auto $0. · Panel block 21 (orders/inventory).
+        Discovery MOCK/Serper · Orchestrator · AgentRun · BullMQ · Shopify/CJ live-ready. Presupuesto auto $0. · Panel block 26 (orders/inventory).
       </footer>
     </main>
   );
