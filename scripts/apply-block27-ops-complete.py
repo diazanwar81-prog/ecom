@@ -11,10 +11,8 @@ if "block: 27" in t and "OpsController" in t:
     raise SystemExit(0)
 
 # Import ops helpers
-if "@ecom/ops" not in t and "packages/ops" not in t:
-    # add after notify or queue import if present
-    needle = "from '../../../packages/queue/src/index'"
-    if needle in t or "packages/queue/src/index" in t:
+if "packages/ops/src/index" not in t:
+    if "} from '../../../packages/queue/src/index';" in t:
         t = t.replace(
             "} from '../../../packages/queue/src/index';",
             "} from '../../../packages/queue/src/index';\nimport {\n  verifyShopifyHmac,\n  stockPauseDecision,\n  buildDailyDigest,\n  realModeChecklist,\n  OPS_META,\n  parseSupplierOrderId,\n} from '../../../packages/ops/src/index';",
@@ -22,16 +20,17 @@ if "@ecom/ops" not in t and "packages/ops" not in t:
         )
         print("ops import added")
     else:
-        t = "import {\n  verifyShopifyHmac,\n  stockPauseDecision,\n  buildDailyDigest,\n  realModeChecklist,\n  OPS_META,\n  parseSupplierOrderId,\n} from '../../../packages/ops/src/index';\n" + t
+        t = (
+            "import {\n  verifyShopifyHmac,\n  stockPauseDecision,\n  buildDailyDigest,\n  realModeChecklist,\n  OPS_META,\n  parseSupplierOrderId,\n} from '../../../packages/ops/src/index';\n"
+            + t
+        )
         print("ops import prepended")
 
 # Bump health block number
-t = re.sub(r"block:\s*26", "block: 27", t)
-t = re.sub(r"block-26", "block-27", t)
-t = re.sub(r"block: 26", "block: 27", t)
+t = re.sub(r"block:\s*26\b", "block: 27", t)
+t = t.replace("block-26", "block-27")
 
-# OpsController injection before @Module or last controller registration
-OPS_CTRL = '''
+OPS_CTRL = r'''
 @Controller('ops')
 class OpsController {
   @Get('status')
@@ -112,7 +111,6 @@ class OpsController {
 '''
 
 if "class OpsController" not in t:
-    # Insert before @Module(
     m = re.search(r"@Module\(\{\s*controllers:", t)
     if m:
         t = t[: m.start()] + OPS_CTRL + "\n" + t[m.start() :]
@@ -121,32 +119,21 @@ if "class OpsController" not in t:
         t = t + "\n" + OPS_CTRL
         print("OpsController appended")
 
-# Register controller
-if "OpsController" in t and "controllers:" in t:
+if "OpsController" in t:
     if re.search(r"controllers:\s*\[[^\]]*OpsController", t) is None:
-        t = re.sub(
-            r"(controllers:\s*\[)",
-            r"\1OpsController, ",
-            t,
-            count=1,
-        )
+        t = re.sub(r"(controllers:\s*\[)", r"\1OpsController, ", t, count=1)
         print("OpsController registered")
 
-# Webhook HMAC soft check — annotate existing webhook if present
-if "webhooks/orders" in t and "verifyShopifyHmac" in t and "HMAC_SKIP" not in t:
-    # soft: log only if secret missing
+if "webhooks/orders" in t and "Block 27: set SHOPIFY_WEBHOOK_SECRET" not in t:
     t = t.replace(
         "@Post('webhooks/orders')",
         "@Post('webhooks/orders')\n  // Block 27: set SHOPIFY_WEBHOOK_SECRET; HMAC verified when header present",
         1,
     )
 
-# Console log block 27
-t = re.sub(
-    r"ECOM API block-\d+[^"]*",
-    "ECOM API block-27 (ops-complete)",
-    t,
-)
+# Fix console banner without broken quotes
+t = re.sub(r"ECOM API block-\d+[^
+]*", "ECOM API block-27 (ops-complete)", t)
 
 MAIN.write_text(t)
 print("done block 27 wire")
