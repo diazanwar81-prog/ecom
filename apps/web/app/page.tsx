@@ -371,8 +371,6 @@ export default function Home() {
       </section>
 
       <section style={{ marginBottom: '1.75rem' }}>
-        
-      <section style={{ marginBottom: '1.75rem' }}>
         <h2>Pedidos ({orders.length})</h2>
         {orders.length === 0 && <p style={{ color: '#64748b' }}>Sin pedidos.</p>}
         <div style={{ display: 'grid', gap: 8 }}>
