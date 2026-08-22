@@ -28,7 +28,10 @@ function isHttpsUrl(u: string): boolean {
   }
 }
 
-/** Block 37: public HTTPS + webhook secret presence */
+export function testWebhookHmac(rawBody: string, hmacHeader: string | undefined): boolean {
+  return verifyShopifyHmac(rawBody, hmacHeader, env('SHOPIFY_WEBHOOK_SECRET') || undefined);
+}
+
 export function verifyHttpsAndWebhooks(): VerifyItem[] {
   const appUrl = env('APP_URL');
   const apiUrl = env('API_URL') || env('PUBLIC_API_URL');
@@ -59,7 +62,6 @@ export function verifyHttpsAndWebhooks(): VerifyItem[] {
         : 'Configura SHOPIFY_WEBHOOK_SECRET para HMAC',
   });
 
-  // Self-test HMAC with local secret (does not call Shopify)
   if (secret.length >= 8) {
     const body = JSON.stringify({ id: 1, test: true, email: 'verify@ecom.local' });
     const sig = createHmac('sha256', secret).update(body, 'utf8').digest('base64');
@@ -80,7 +82,6 @@ export function verifyHttpsAndWebhooks(): VerifyItem[] {
   return items;
 }
 
-/** Block 38: E2E readiness (data shape gates, not a real card charge) */
 export function verifyE2EGates(input: {
   publishedWithCj: number;
   ordersPaid: number;
@@ -128,7 +129,6 @@ export function verifyE2EGates(input: {
   return items;
 }
 
-/** Block 39: inventory auto-pause policy */
 export function applyInventoryPolicy(
   rows: { productId: string; stock: number | null | undefined; status?: string }[],
 ): {
@@ -180,7 +180,6 @@ export function verifyInventoryLoop(input: {
   ];
 }
 
-/** Block 40: tracking extraction / poll readiness */
 export function extractTrackingFromNote(note?: string | null): {
   supplierOrderId: string | null;
   trackingHint: string | null;
