@@ -71,6 +71,28 @@ import {
   proposePriceChange,
   ANALYTICS_META,
 } from '../../../packages/analytics/src/index';
+import {
+  productionReadiness,
+  ciPipelineHint,
+  DEPLOY_META,
+} from '../../../packages/deploy/src/index';
+
+import {
+  getAdsStatus,
+  buildCampaignDraft,
+  attemptActivateCampaign,
+  ADS_META,
+} from '../../../packages/ads/src/index';
+
+import {
+  buildMetaTags,
+  buildProductJsonLd,
+  buildRobotsTxt,
+  buildSitemapXml,
+  seoScore,
+  SEO_META,
+} from '../../../packages/seo/src/index';
+
 
 import {
   buildOrganicDrafts,
@@ -497,7 +519,7 @@ class HealthController {
       service: 'ecom-api',
       mode: MODE,
       timestamp: new Date().toISOString(),
-      block: 33,
+      block: 36,
       aiRouter: true,
       orchestrator: true,
       agentRuns: true,
@@ -1984,7 +2006,7 @@ class DashboardController {
     ];
     return {
       mode: process.env.ECOM_MODE || 'MOCK',
-      block: 33,
+      block: 36,
       kpis: {
         published,
         pendingApproval: pending,
@@ -2082,7 +2104,7 @@ class AnalyticsController {
     for (const p of products) byStatus[p.status] = (byStatus[p.status] || 0) + 1;
     return {
       mode: process.env.ECOM_MODE || 'MOCK',
-      block: 33,
+      block: 36,
       products: products.length,
       orders: orders.length,
       revenue,
@@ -2097,7 +2119,7 @@ class AnalyticsController {
   ) {
     return {
       mode: process.env.ECOM_MODE || 'MOCK',
-      block: 33,
+      block: 36,
       ...realizedMargin(body),
     };
   }
@@ -2120,7 +2142,7 @@ class AnalyticsController {
       productCost: body.productCost,
       shippingCost: body.shippingCost,
     });
-    return { mode: process.env.ECOM_MODE || 'MOCK', block: 33, ...result };
+    return { mode: process.env.ECOM_MODE || 'MOCK', block: 36, ...result };
   }
 
   @Post('underperformance')
@@ -2142,12 +2164,143 @@ class AnalyticsController {
       revenue: related.reduce((a, o) => a + Number(o.total || 0), 0),
       daysSincePublish: days,
     }, { minDays: body.minDays });
-    return { mode: process.env.ECOM_MODE || 'MOCK', block: 33, productId: p.id, days, orders: related.length, decision };
+    return { mode: process.env.ECOM_MODE || 'MOCK', block: 36, productId: p.id, days, orders: related.length, decision };
+  }
+}
+
+
+@Controller('seo')
+class SeoController {
+  @Get('meta')
+  meta() {
+    return { mode: process.env.ECOM_MODE || 'MOCK', ...SEO_META };
+  }
+
+  @Post('product')
+  async product(@Body() body: { productId?: string; title?: string; description?: string; url?: string }) {
+    let title = body?.title || 'Producto';
+    let description = body?.description;
+    let salePrice: any;
+    let currency = 'COP';
+    let sku: string | undefined;
+    let url = body?.url;
+    if (body?.productId) {
+      const p = await prisma.product.findUnique({ where: { id: body.productId } });
+      if (p) {
+        title = p.title;
+        description = p.description || description;
+        salePrice = p.salePrice;
+        currency = p.currency;
+        sku = (p as any).cjSku || undefined;
+        if (p.externalId) {
+          const shop = process.env.SHOPIFY_SHOP_DOMAIN || '';
+          if (shop) url = url || `https://${String(shop).replace(/^https?:\/\//, '')}/products/${p.externalId}`;
+        }
+      }
+    }
+    const input = { title, description, salePrice, currency, url, sku };
+    const tags = buildMetaTags(input);
+    const jsonLd = buildProductJsonLd(input);
+    const score = seoScore({
+      hasTitle: Boolean(title),
+      hasDescription: Boolean(description),
+      hasImage: false,
+      hasJsonLd: true,
+      titleLen: title.length,
+      descLen: (description || '').length,
+    });
+    return { mode: process.env.ECOM_MODE || 'MOCK', block: 34, tags, jsonLd, score };
+  }
+
+  @Get('robots.txt')
+  robots() {
+    const app = process.env.APP_URL || 'http://localhost:3000';
+    return buildRobotsTxt({ sitemapUrl: `${app}/seo/sitemap.xml` });
+  }
+
+  @Get('sitemap.xml')
+  async sitemap() {
+    const shop = process.env.SHOPIFY_SHOP_DOMAIN || process.env.APP_URL || 'http://localhost:3000';
+    const products = await prisma.product.findMany({
+      where: { status: 'PUBLISHED' },
+      take: 200,
+      orderBy: { updatedAt: 'desc' },
+    });
+    const urls = products
+      .filter((p) => p.externalId)
+      .map((p) => ({
+        loc: `https://${String(shop).replace(/^https?:\/\//, '')}/products/${p.externalId}`,
+        lastmod: p.updatedAt.toISOString().slice(0, 10),
+        changefreq: 'weekly',
+        priority: 0.8,
+      }));
+    return buildSitemapXml(urls);
+  }
+}
+
+@Controller('ads')
+class AdsController {
+  @Get('status')
+  status() {
+    return { mode: process.env.ECOM_MODE || 'MOCK', ...getAdsStatus(), ...ADS_META };
+  }
+
+  @Post('draft')
+  draft(
+    @Body()
+    body: { productTitle?: string; platform?: 'meta' | 'google' | 'tiktok'; dailyBudgetUsd?: number },
+  ) {
+    const draft = buildCampaignDraft({
+      productTitle: body?.productTitle || 'Producto ECOM',
+      platform: body?.platform,
+      dailyBudgetUsd: body?.dailyBudgetUsd ?? 0,
+    });
+    return { mode: process.env.ECOM_MODE || 'MOCK', block: 35, draft };
+  }
+
+  @Post('activate-attempt')
+  activate(
+    @Body()
+    body: {
+      productTitle?: string;
+      dailyBudgetUsd?: number;
+      force?: boolean;
+      humanApproved?: boolean;
+    },
+  ) {
+    const draft = buildCampaignDraft({
+      productTitle: body?.productTitle || 'test',
+      dailyBudgetUsd: body?.dailyBudgetUsd ?? 0,
+    });
+    const result = attemptActivateCampaign(draft, {
+      force: Boolean(body?.force),
+      humanApproved: Boolean(body?.humanApproved),
+    });
+    return { mode: process.env.ECOM_MODE || 'MOCK', block: 35, ...result };
+  }
+}
+
+@Controller('deploy')
+class DeployController {
+  @Get('status')
+  status() {
+    return { mode: process.env.ECOM_MODE || 'MOCK', ...DEPLOY_META };
+  }
+
+  @Get('readiness')
+  readiness() {
+    const result = productionReadiness(process.env as any);
+    return { mode: process.env.ECOM_MODE || 'MOCK', block: 36, ...result };
+  }
+
+  @Get('ci-hints')
+  ci() {
+    return { mode: process.env.ECOM_MODE || 'MOCK', block: 36, steps: ciPipelineHint() };
   }
 }
 
 @Module({
-  controllers: [TrendsController, MarketingController, AnalyticsController, ScoringController, ContentController, DashboardController, OpsController, 
+  controllers: [SeoController, AdsController, DeployController, TrendsController, MarketingController, AnalyticsController, ScoringController, ContentController, DashboardController, OpsController, 
     HealthController,
     DiscoveryController,
     JobsController,
@@ -2220,7 +2373,7 @@ async function bootstrap() {
   }
   try {
     startDiscoveryScheduler();
-  void alertOps('BOOT', { service: 'ecom-api', block: 33 });
+  void alertOps('BOOT', { service: 'ecom-api', block: 36 });
   } catch (e: any) {
     console.warn('[queue] scheduler not started:', e?.message);
   }
