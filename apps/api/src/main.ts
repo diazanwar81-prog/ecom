@@ -76,6 +76,18 @@ import {
   ciPipelineHint,
   DEPLOY_META,
 } from '../../../packages/deploy/src/index';
+import {
+  verifyHttpsAndWebhooks,
+  verifyE2EGates,
+  applyInventoryPolicy,
+  verifyInventoryLoop,
+  extractTrackingFromNote,
+  verifyTracking,
+  summarizeVerification,
+  testWebhookHmac,
+  REAL_CLOSE_META,
+} from '../../../packages/real-close/src/index';
+
 
 import {
   getAdsStatus,
@@ -519,7 +531,7 @@ class HealthController {
       service: 'ecom-api',
       mode: MODE,
       timestamp: new Date().toISOString(),
-      block: 36,
+      block: 40,
       aiRouter: true,
       orchestrator: true,
       agentRuns: true,
@@ -2006,7 +2018,7 @@ class DashboardController {
     ];
     return {
       mode: process.env.ECOM_MODE || 'MOCK',
-      block: 36,
+      block: 40,
       kpis: {
         published,
         pendingApproval: pending,
@@ -2104,7 +2116,7 @@ class AnalyticsController {
     for (const p of products) byStatus[p.status] = (byStatus[p.status] || 0) + 1;
     return {
       mode: process.env.ECOM_MODE || 'MOCK',
-      block: 36,
+      block: 40,
       products: products.length,
       orders: orders.length,
       revenue,
@@ -2119,7 +2131,7 @@ class AnalyticsController {
   ) {
     return {
       mode: process.env.ECOM_MODE || 'MOCK',
-      block: 36,
+      block: 40,
       ...realizedMargin(body),
     };
   }
@@ -2142,7 +2154,7 @@ class AnalyticsController {
       productCost: body.productCost,
       shippingCost: body.shippingCost,
     });
-    return { mode: process.env.ECOM_MODE || 'MOCK', block: 36, ...result };
+    return { mode: process.env.ECOM_MODE || 'MOCK', block: 40, ...result };
   }
 
   @Post('underperformance')
@@ -2164,7 +2176,7 @@ class AnalyticsController {
       revenue: related.reduce((a, o) => a + Number(o.total || 0), 0),
       daysSincePublish: days,
     }, { minDays: body.minDays });
-    return { mode: process.env.ECOM_MODE || 'MOCK', block: 36, productId: p.id, days, orders: related.length, decision };
+    return { mode: process.env.ECOM_MODE || 'MOCK', block: 40, productId: p.id, days, orders: related.length, decision };
   }
 }
 
@@ -2290,17 +2302,158 @@ class DeployController {
   @Get('readiness')
   readiness() {
     const result = productionReadiness(process.env as any);
-    return { mode: process.env.ECOM_MODE || 'MOCK', block: 36, ...result };
+    return { mode: process.env.ECOM_MODE || 'MOCK', block: 40, ...result };
   }
 
   @Get('ci-hints')
   ci() {
-    return { mode: process.env.ECOM_MODE || 'MOCK', block: 36, steps: ciPipelineHint() };
+    return { mode: process.env.ECOM_MODE || 'MOCK', block: 40, steps: ciPipelineHint() };
+  }
+}
+
+
+@Controller('real')
+class RealCloseController {
+  @Get('meta')
+  meta() {
+    return { mode: process.env.ECOM_MODE || 'MOCK', ...REAL_CLOSE_META };
+  }
+
+  @Get('verify')
+  async verify() {
+    const items = [...verifyHttpsAndWebhooks()];
+
+    const products = await prisma.product.findMany({ take: 200 });
+    const orders = await prisma.order.findMany({ take: 200 });
+    const publishedWithCj = products.filter(
+      (p) => p.status === 'PUBLISHED' && ((p as any).cjVariantId || (p as any).cjSku),
+    ).length;
+    const ordersPaid = orders.filter((o) => o.status === 'PAID').length;
+    const ordersFulfilled = orders.filter((o) => o.status === 'FULFILLED').length;
+
+    const shopifyLive = String(process.env.SHOPIFY_ACCESS_TOKEN || '').length > 5;
+    const cjLive = String(process.env.CJ_API_KEY || '').length > 5;
+
+    items.push(
+      ...verifyE2EGates({
+        publishedWithCj,
+        ordersPaid,
+        ordersFulfilled,
+        shopifyLive,
+        cjLive,
+      }),
+    );
+
+    const inv = applyInventoryPolicy(
+      products.map((p) => ({
+        productId: p.id,
+        stock: (p as any).stock ?? null,
+        status: p.status,
+      })),
+    );
+    items.push(
+      ...verifyInventoryLoop({
+        checked: inv.results.length,
+        paused: inv.toPause.length,
+        errors: 0,
+      }),
+    );
+
+    let withSupplierId = 0;
+    let withTracking = 0;
+    for (const o of orders.filter((x) => x.status === 'FULFILLED')) {
+      const tr = extractTrackingFromNote((o as any).fulfillmentNote);
+      if (tr.supplierOrderId) withSupplierId++;
+      if (tr.trackingHint) withTracking++;
+    }
+    items.push(
+      ...verifyTracking({
+        fulfilledOrders: ordersFulfilled,
+        withSupplierId,
+        withTracking,
+      }),
+    );
+
+    const summary = summarizeVerification(items);
+    return {
+      mode: process.env.ECOM_MODE || 'MOCK',
+      block: 40,
+      ...summary,
+      inventoryDryRun: { toPause: inv.toPause, sample: inv.results.slice(0, 5) },
+      nextActions: summary.ok
+        ? [
+            'Mantén HTTPS fijo (no túnel efímero)',
+            'Haz 1 pedido real de prueba y revisa /orders',
+            'POST /real/inventory/apply-pauses si quieres pausar stock 0',
+          ]
+        : summary.items.filter((i) => !i.ok && i.severity === 'critical').map((i) => i.message),
+    };
+  }
+
+  @Post('webhook/hmac-test')
+  hmacTest(@Body() body: any, @Headers('x-shopify-hmac-sha256') hmac?: string) {
+    const raw = JSON.stringify(body ?? {});
+    const ok = testWebhookHmac(raw, hmac);
+    return {
+      mode: process.env.ECOM_MODE || 'MOCK',
+      block: 37,
+      ok,
+      note: ok ? 'Firma válida' : 'Firma inválida o secret ausente',
+    };
+  }
+
+  @Post('inventory/apply-pauses')
+  async applyPauses(@Body() body: { dryRun?: boolean }) {
+    const dryRun = body?.dryRun !== false;
+    const products = await prisma.product.findMany({ take: 200 });
+    const inv = applyInventoryPolicy(
+      products.map((p) => ({
+        productId: p.id,
+        stock: (p as any).stock ?? null,
+        status: p.status,
+      })),
+    );
+    const paused: string[] = [];
+    if (!dryRun) {
+      for (const id of inv.toPause) {
+        await prisma.product.update({ where: { id }, data: { status: 'PAUSED' } });
+        await writeAudit('AUTO_PAUSE_STOCK', 'Product', id, { reason: 'stock_zero' });
+        paused.push(id);
+      }
+    }
+    return {
+      mode: process.env.ECOM_MODE || 'MOCK',
+      block: 39,
+      dryRun,
+      toPause: inv.toPause,
+      paused,
+      results: inv.results,
+    };
+  }
+
+  @Post('tracking/scan')
+  async trackingScan() {
+    const orders = await prisma.order.findMany({
+      where: { status: 'FULFILLED' },
+      take: 100,
+      orderBy: { updatedAt: 'desc' },
+    });
+    const items = orders.map((o) => {
+      const tr = extractTrackingFromNote((o as any).fulfillmentNote);
+      return {
+        orderId: o.id,
+        orderNumber: (o as any).orderNumber,
+        ...tr,
+        fulfillmentNote: (o as any).fulfillmentNote,
+      };
+    });
+    await writeAudit('TRACKING_SCAN', 'Order', 'batch', { count: items.length });
+    return { mode: process.env.ECOM_MODE || 'MOCK', block: 40, count: items.length, items };
   }
 }
 
 @Module({
-  controllers: [SeoController, AdsController, DeployController, TrendsController, MarketingController, AnalyticsController, ScoringController, ContentController, DashboardController, OpsController, 
+  controllers: [RealCloseController, SeoController, AdsController, DeployController, TrendsController, MarketingController, AnalyticsController, ScoringController, ContentController, DashboardController, OpsController, 
     HealthController,
     DiscoveryController,
     JobsController,
@@ -2373,7 +2526,7 @@ async function bootstrap() {
   }
   try {
     startDiscoveryScheduler();
-  void alertOps('BOOT', { service: 'ecom-api', block: 36 });
+  void alertOps('BOOT', { service: 'ecom-api', block: 40 });
   } catch (e: any) {
     console.warn('[queue] scheduler not started:', e?.message);
   }
