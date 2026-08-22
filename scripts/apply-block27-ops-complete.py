@@ -1,36 +1,37 @@
 #!/usr/bin/env python3
-"""Wire block 27: HMAC note, inventory/tracking/digest jobs status, real checklist, export."""
 from pathlib import Path
 import re
 
 MAIN = Path(__file__).resolve().parents[1] / "apps/api/src/main.ts"
 t = MAIN.read_text()
 
-if "block: 27" in t and "OpsController" in t:
+if "class OpsController" in t and "block: 27" in t:
     print("already block 27")
     raise SystemExit(0)
 
-# Import ops helpers
+IMPORT = """import {
+  verifyShopifyHmac,
+  stockPauseDecision,
+  buildDailyDigest,
+  realModeChecklist,
+  OPS_META,
+  parseSupplierOrderId,
+} from '../../../packages/ops/src/index';
+"""
+
 if "packages/ops/src/index" not in t:
-    if "} from '../../../packages/queue/src/index';" in t:
-        t = t.replace(
-            "} from '../../../packages/queue/src/index';",
-            "} from '../../../packages/queue/src/index';\nimport {\n  verifyShopifyHmac,\n  stockPauseDecision,\n  buildDailyDigest,\n  realModeChecklist,\n  OPS_META,\n  parseSupplierOrderId,\n} from '../../../packages/ops/src/index';",
-            1,
-        )
+    marker = "} from '../../../packages/queue/src/index';"
+    if marker in t:
+        t = t.replace(marker, marker + "\n" + IMPORT, 1)
         print("ops import added")
     else:
-        t = (
-            "import {\n  verifyShopifyHmac,\n  stockPauseDecision,\n  buildDailyDigest,\n  realModeChecklist,\n  OPS_META,\n  parseSupplierOrderId,\n} from '../../../packages/ops/src/index';\n"
-            + t
-        )
+        t = IMPORT + t
         print("ops import prepended")
 
-# Bump health block number
-t = re.sub(r"block:\s*26\b", "block: 27", t)
+t = t.replace("block: 26", "block: 27")
 t = t.replace("block-26", "block-27")
 
-OPS_CTRL = r'''
+OPS_CTRL = """
 @Controller('ops')
 class OpsController {
   @Get('status')
@@ -81,9 +82,18 @@ class OpsController {
     const items = await prisma.product.findMany({ orderBy: { createdAt: 'desc' }, take: 500 });
     const header = 'id,title,status,marginPercent,salePrice,currency,externalId,createdAt';
     const rows = items.map((p) =>
-      [p.id, JSON.stringify(p.title), p.status, p.marginPercent ?? '', p.salePrice ?? '', p.currency, p.externalId ?? '', p.createdAt.toISOString()].join(','),
+      [
+        p.id,
+        JSON.stringify(p.title),
+        p.status,
+        p.marginPercent ?? '',
+        p.salePrice ?? '',
+        p.currency,
+        p.externalId ?? '',
+        p.createdAt.toISOString(),
+      ].join(','),
     );
-    return header + '\n' + rows.join('\n');
+    return header + '\\n' + rows.join('\\n');
   }
 
   @Post('inventory/sync-all')
@@ -108,7 +118,7 @@ class OpsController {
     return { mode: process.env.ECOM_MODE || 'MOCK', count: results.length, results };
   }
 }
-'''
+"""
 
 if "class OpsController" not in t:
     m = re.search(r"@Module\(\{\s*controllers:", t)
@@ -119,21 +129,9 @@ if "class OpsController" not in t:
         t = t + "\n" + OPS_CTRL
         print("OpsController appended")
 
-if "OpsController" in t:
-    if re.search(r"controllers:\s*\[[^\]]*OpsController", t) is None:
-        t = re.sub(r"(controllers:\s*\[)", r"\1OpsController, ", t, count=1)
-        print("OpsController registered")
-
-if "webhooks/orders" in t and "Block 27: set SHOPIFY_WEBHOOK_SECRET" not in t:
-    t = t.replace(
-        "@Post('webhooks/orders')",
-        "@Post('webhooks/orders')\n  // Block 27: set SHOPIFY_WEBHOOK_SECRET; HMAC verified when header present",
-        1,
-    )
-
-# Fix console banner without broken quotes
-t = re.sub(r"ECOM API block-\d+[^
-]*", "ECOM API block-27 (ops-complete)", t)
+if "OpsController" in t and "OpsController," not in t.split("controllers:")[1][:200]:
+    t = re.sub(r"(controllers:\s*\[)", r"\1OpsController, ", t, count=1)
+    print("OpsController registered")
 
 MAIN.write_text(t)
 print("done block 27 wire")
