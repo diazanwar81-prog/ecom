@@ -46,6 +46,37 @@ import {
 } from '../../../packages/queue/src/index';
 import { alertOps, getNotifyStatus, sendTelegram } from '../../../packages/notify/src/index';
 
+async function maybeAlertStock(product: {
+  id?: string;
+  title?: string;
+  stock?: number | null;
+  shouldPause?: boolean;
+  marginBand?: string;
+}) {
+  try {
+    const stock = product?.stock;
+    if (stock === 0) {
+      await alertOps('STOCK_ZERO', {
+        productId: product.id || 'n/a',
+        title: (product.title || '').toString().slice(0, 80),
+        stock: 0,
+        marginBand: product.marginBand || '',
+      });
+    } else if (product?.shouldPause) {
+      await alertOps('STOCK_PAUSE', {
+        productId: product.id || 'n/a',
+        title: (product.title || '').toString().slice(0, 80),
+        stock: stock ?? 'n/a',
+        marginBand: product.marginBand || '',
+      });
+    }
+  } catch {
+    /* never break main flow */
+  }
+}
+
+
+
 const MODE = (process.env.ECOM_MODE ?? 'MOCK') as 'MOCK' | 'SANDBOX' | 'REAL';
 const MODE_ENUM = (MODE === 'REAL' ? 'REAL' : MODE === 'SANDBOX' ? 'SANDBOX' : 'MOCK') as RuntimeMode;
 
@@ -375,7 +406,7 @@ class HealthController {
       service: 'ecom-api',
       mode: MODE,
       timestamp: new Date().toISOString(),
-      block: 22,
+      block: 23,
       aiRouter: true,
       orchestrator: true,
       agentRuns: true,
@@ -474,6 +505,27 @@ class DiscoveryController {
 
 @Controller('alerts')
 class AlertsController {
+  @Get('stock-risks')
+  async stockRisks() {
+    const items = await prisma.product.findMany({ orderBy: { updatedAt: 'desc' }, take: 50 });
+    const risks: any[] = [];
+    for (const p of items) {
+      const enriched = enrichProduct(p);
+      if (enriched.stock === 0 || enriched.shouldPause) {
+        risks.push({
+          id: enriched.id,
+          title: enriched.title,
+          stock: enriched.stock,
+          shouldPause: enriched.shouldPause,
+          marginBand: enriched.marginBand,
+          status: enriched.status,
+        });
+        void maybeAlertStock(enriched);
+      }
+    }
+    return { mode: process.env.ECOM_MODE || 'MOCK', count: risks.length, items: risks };
+  }
+
   @Get('status')
   status() {
     return { mode: process.env.ECOM_MODE || 'MOCK', ...getNotifyStatus() };
@@ -1156,6 +1208,7 @@ class ProductsController {
     if (!p) return { error: 'not_found' };
     const enriched = enrichProduct(p);
     if (enriched.shouldPause || !enriched.canPublish) {
+      void maybeAlertStock(enriched);
       return { error: 'rules_block', reason: 'Margen/stock no permiten publicación', item: enriched };
     }
     if (p.isFirstPublication) {
@@ -1210,6 +1263,9 @@ class ProductsController {
     }
     const enriched = enrichProduct(row);
     const available = body?.available != null ? Number(body.available) : Number(enriched.stock ?? 0);
+    if (available === 0) {
+      void maybeAlertStock({ id, title: enriched.title, stock: 0, shouldPause: true, marginBand: enriched.marginBand });
+    }
 
     // Fetch variant inventory_item_id from Shopify product
     const status = getShopifyStatus();
@@ -1258,6 +1314,7 @@ class ProductsController {
     if (!p) return { error: 'not_found' };
     const enriched = enrichProduct(p);
     if (enriched.shouldPause || !enriched.canPublish) {
+      void maybeAlertStock(enriched);
       return { error: 'rules_block', reason: 'Margen/stock no permiten publicación', item: enriched };
     }
 
