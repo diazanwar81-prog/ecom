@@ -144,15 +144,57 @@ export default function Home() {
     await load();
   }
 
+function optimisticRemoveApproval(approvalId: string, productId?: string | null) {
+    setApprovals((prev) =>
+      prev.map((a) =>
+        a.id === approvalId ? { ...a, status: 'APPROVED' } : a,
+      ),
+    );
+    if (productId) {
+      setProducts((prev) =>
+        prev.map((p) =>
+          p.id === productId && p.status === 'PENDING_APPROVAL'
+            ? { ...p, status: 'PUBLISHED' }
+            : p,
+        ),
+      );
+    }
+  }
+
   async function decide(id: string, decision: 'APPROVED' | 'REJECTED') {
     setMessage(null);
-    const res = await fetch(`${API}/approvals/${id}/decide`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ decision }),
-    });
-    const data = await res.json();
-    setMessage(`Decisión ${decision} · ${data.approval?.id}`);
+    const current = approvals.find((a) => a.id === id);
+    // UI inmediata
+    setApprovals((prev) =>
+      prev.map((a) => (a.id === id ? { ...a, status: decision } : a)),
+    );
+    if (current?.productId) {
+      setProducts((prev) =>
+        prev.map((p) =>
+          p.id === current.productId
+            ? { ...p, status: decision === 'APPROVED' ? 'DRAFT' : 'REJECTED' }
+            : p,
+        ),
+      );
+    }
+    try {
+      const res = await fetch(`${API}/approvals/${id}/decide`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ decision }),
+      });
+      const data = await res.json();
+      if (data.error) {
+        setMessage(`Error: ${data.error}`);
+        await load();
+        return;
+      }
+      setMessage(`Decisión ${decision}`);
+    } catch (e: any) {
+      setMessage(e?.message || 'Error de red');
+      await load();
+      return;
+    }
     await load();
   }
 
@@ -200,14 +242,31 @@ export default function Home() {
   
   async function goLive(id: string) {
     setMessage(null);
-    const res = await fetch(`${API}/products/${id}/go-live`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ note: 'Aprobado y publicado desde panel' }),
-    });
-    const data = await res.json();
-    if (data.error) setMessage(`Go-live: ${data.error} ${data.reason || ''}`);
-    else setMessage(`Go-live OK · shopify=${data.shopify?.externalId} · mock=${data.mock}`);
+    // Quitar de pendientes al instante
+    setApprovals((prev) =>
+      prev.map((a) =>
+        a.productId === id && a.status === 'PENDING' ? { ...a, status: 'APPROVED' } : a,
+      ),
+    );
+    setProducts((prev) =>
+      prev.map((p) => (p.id === id ? { ...p, status: 'PUBLISHED' } : p)),
+    );
+    try {
+      const res = await fetch(`${API}/products/${id}/go-live`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ note: 'Aprobado y publicado desde panel' }),
+      });
+      const data = await res.json();
+      if (data.error) {
+        setMessage(`Go-live: ${data.error} ${data.reason || ''}`);
+        await load();
+        return;
+      }
+      setMessage(`Go-live OK · shopify=${data.shopify?.externalId || data.product?.externalId} · mock=${data.mock}`);
+    } catch (e: any) {
+      setMessage(e?.message || 'Error de red');
+    }
     await load();
   }
 
