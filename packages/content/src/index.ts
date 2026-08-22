@@ -1,7 +1,7 @@
 /**
  * ECOM Content
  * - Block 29: landing HTML
- * - Block 61: creative product brief (nombre, título, descripción, bullets, SEO, plan media)
+ * - Block 61: creative product brief
  */
 
 import { complete, type AiResponse } from '../../ai-router/src/index';
@@ -27,11 +27,7 @@ export function buildLandingHtml(p: ProductLandingInput): string {
   const desc =
     p.description ||
     `${p.title}. Envío a ${p.countryCode || 'CO'}. Compra segura vía Shopify.`;
-  const benefits = (p.benefits || [
-    'Envío con seguimiento',
-    'Pago seguro',
-    'Soporte por la tienda',
-  ])
+  const benefits = (p.benefits || ['Envío con seguimiento', 'Pago seguro', 'Soporte por la tienda'])
     .map((b) => `<li>${escapeHtml(b)}</li>`)
     .join('');
   const img = p.imageUrl
@@ -88,8 +84,6 @@ export function assetStatusForVideo(hasProvider: boolean): AssetStatus {
   return hasProvider ? 'READY' : 'ASSET_PENDING';
 }
 
-// ─── Block 61: Creative brief ───────────────────────────────────────────────
-
 export type CreativeBriefInput = {
   rawTitle: string;
   facts?: string;
@@ -98,7 +92,6 @@ export type CreativeBriefInput = {
   currency?: string;
   salePrice?: number;
   language?: string;
-  /** If true, skip live AI and use deterministic mock brief */
   forceMock?: boolean;
 };
 
@@ -131,47 +124,13 @@ function cleanTitle(raw: string): string {
     .slice(0, 120);
 }
 
-function mockBrief(input: CreativeBriefInput): CreativeBrief {
-  const base = cleanTitle(input.rawTitle) || 'Producto ECOM';
-  const short = base.length > 60 ? base.slice(0, 57) + '…' : base;
-  const bullets = [
-    'Diseño práctico para uso diario',
-    'Materiales seleccionados para durabilidad',
-    'Fácil de integrar en tu rutina',
-    `Envío con seguimiento a ${input.countryCode || 'CO'}`,
-  ];
-  return {
-    productName: short,
-    title: short,
-    description:
-      `${short} pensado para quienes buscan calidad y practicidad. ` +
-      `Ideal como regalo o uso personal. ` +
-      (input.facts ? `Detalles: ${input.facts.slice(0, 180)}. ` : '') +
-      `Compra segura y envío con seguimiento.`,
-    bullets,
-    importantInfo: [
-      'Verificar medidas/colores en la ficha antes de comprar',
-      'Tiempos de envío internacional pueden variar',
-      'No se hacen afirmaciones médicas ni de resultados garantizados',
-    ],
-    seo: {
-      metaTitle: `${short} | Tienda ECOM`,
-      metaDescription: `${short}. Envío a ${input.countryCode || 'CO'}. Compra segura.`,
-      tags: ['ecom', 'dropshipping', (input.category || 'general').toLowerCase()],
-    },
-    mediaPlan: defaultMediaPlan(short),
-    language: input.language || 'es-CO',
-    source: 'mock',
-  };
-}
-
 export function defaultMediaPlan(productName: string): MediaPlan {
   const n = productName.slice(0, 80);
   return {
     images: [
       {
         role: 'hero_main',
-        prompt: `Foto de producto profesional de ${n}, fondo limpio, iluminación de estudio, centrado, e-commerce`,
+        prompt: `Foto de producto profesional de ${n}, fondo limpio, iluminacion de estudio, centrado, e-commerce`,
       },
       {
         role: 'lifestyle',
@@ -183,29 +142,63 @@ export function defaultMediaPlan(productName: string): MediaPlan {
       },
       {
         role: 'packshot_angle',
-        prompt: `Ángulo alterno de ${n} sobre superficie neutra, sombra suave`,
+        prompt: `Angulo alterno de ${n} sobre superficie neutra, sombra suave`,
       },
       {
         role: 'infographic',
-        prompt: `Infografía limpia de beneficios de ${n}, iconos simples, texto legible en español, fondo blanco`,
+        prompt: `Infografia limpia de beneficios de ${n}, iconos simples, texto legible en espanol, fondo blanco`,
       },
     ],
     videos: [
       {
         role: 'ugc_hook',
-        prompt: `Video corto vertical 9:16 de ${n}, hook en 3s, demostración rápida, subtítulos ES`,
+        prompt: `Video corto vertical 9:16 de ${n}, hook en 3s, demostracion rapida, subtitulos ES`,
         durationHintSec: 15,
       },
       {
         role: 'descriptive',
-        prompt: `Video descriptivo de ${n}: características, uso y CTA final, 9:16, subtítulos ES`,
+        prompt: `Video descriptivo de ${n}: caracteristicas, uso y CTA final, 9:16, subtitulos ES`,
         durationHintSec: 30,
       },
     ],
   };
 }
 
-function tryParseJsonBrief(text: string): Partial<CreativeBrief> | null {
+function mockBrief(input: CreativeBriefInput): CreativeBrief {
+  const base = cleanTitle(input.rawTitle) || 'Producto ECOM';
+  const short = base.length > 60 ? base.slice(0, 57) + '...' : base;
+  const bullets = [
+    'Diseno practico para uso diario',
+    'Materiales seleccionados para durabilidad',
+    'Facil de integrar en tu rutina',
+    `Envio con seguimiento a ${input.countryCode || 'CO'}`,
+  ];
+  return {
+    productName: short,
+    title: short,
+    description:
+      `${short} pensado para quienes buscan calidad y practicidad. ` +
+      `Ideal como regalo o uso personal. ` +
+      (input.facts ? `Detalles: ${input.facts.slice(0, 180)}. ` : '') +
+      `Compra segura y envio con seguimiento.`,
+    bullets,
+    importantInfo: [
+      'Verificar medidas/colores en la ficha antes de comprar',
+      'Tiempos de envio internacional pueden variar',
+      'No se hacen afirmaciones medicas ni de resultados garantizados',
+    ],
+    seo: {
+      metaTitle: `${short} | Tienda ECOM`,
+      metaDescription: `${short}. Envio a ${input.countryCode || 'CO'}. Compra segura.`,
+      tags: ['ecom', 'dropshipping', (input.category || 'general').toLowerCase()],
+    },
+    mediaPlan: defaultMediaPlan(short),
+    language: input.language || 'es-CO',
+    source: 'mock',
+  };
+}
+
+function tryParseJsonBrief(text: string): any | null {
   const m = text.match(/\{[\s\S]*\}/);
   if (!m) return null;
   try {
@@ -220,12 +213,99 @@ export async function generateCreativeBrief(input: CreativeBriefInput): Promise<
   brief: CreativeBrief;
   ai?: AiResponse;
 }> {
-  if (input.forceMock || process.env.ECOM_MODE === 'MOCK') {
+  if (input.forceMock) {
     return { ok: true, brief: mockBrief(input) };
   }
 
   const lang = input.language || 'es-CO';
   const system =
     'Eres director creativo de e-commerce para Colombia (es-CO). ' +
-    'Responde SOLO con JSON válido, sin markdown. Esquema: ' +
-    '{
+    'Responde SOLO con JSON valido, sin markdown. Campos: ' +
+    'productName, title, description, bullets (array 4), importantInfo (array 3), ' +
+    'seo: {metaTitle, metaDescription, tags}. Sin promesas medicas.';
+
+  const user =
+    `Producto crudo: ${input.rawTitle}\n` +
+    `Categoria: ${input.category || 'general'}\n` +
+    `Pais: ${input.countryCode || 'CO'}\n` +
+    `Precio: ${input.salePrice != null ? input.salePrice + ' ' + (input.currency || 'COP') : 'n/a'}\n` +
+    `Hechos: ${input.facts || 'n/a'}\n` +
+    `Idioma: ${lang}`;
+
+  const ai = await complete({
+    task: 'copy',
+    temperature: 0.5,
+    maxTokens: 900,
+    messages: [
+      { role: 'system', content: system },
+      { role: 'user', content: user },
+    ],
+  });
+
+  const parsed = ai.ok ? tryParseJsonBrief(ai.text) : null;
+  if (!parsed || !parsed.title) {
+    const fallback = mockBrief(input);
+    return {
+      ok: true,
+      brief: {
+        ...fallback,
+        source: ai.mock ? 'mock' : 'mock',
+        provider: ai.provider,
+        model: ai.model,
+        rawText: ai.text,
+      },
+      ai,
+    };
+  }
+
+  const productName = String(parsed.productName || parsed.title || cleanTitle(input.rawTitle)).slice(0, 80);
+  const title = String(parsed.title || productName).slice(0, 120);
+  const description = String(parsed.description || '').slice(0, 2000);
+  const bullets = Array.isArray(parsed.bullets)
+    ? parsed.bullets.map(String).slice(0, 6)
+    : mockBrief(input).bullets;
+  const importantInfo = Array.isArray(parsed.importantInfo)
+    ? parsed.importantInfo.map(String).slice(0, 5)
+    : mockBrief(input).importantInfo;
+  const seo = parsed.seo || {};
+
+  const brief: CreativeBrief = {
+    productName,
+    title,
+    description: description || mockBrief(input).description,
+    bullets,
+    importantInfo,
+    seo: {
+      metaTitle: String(seo.metaTitle || `${title} | ECOM`).slice(0, 70),
+      metaDescription: String(seo.metaDescription || description.slice(0, 155)).slice(0, 160),
+      tags: Array.isArray(seo.tags) ? seo.tags.map(String).slice(0, 10) : ['ecom'],
+    },
+    mediaPlan: defaultMediaPlan(productName),
+    language: lang,
+    source: ai.mock ? 'mock' : 'ai',
+    provider: ai.provider,
+    model: ai.model,
+    rawText: ai.text,
+  };
+
+  return { ok: true, brief, ai };
+}
+
+export function validateBrief(brief: CreativeBrief): {
+  ok: boolean;
+  issues: string[];
+} {
+  const issues: string[] = [];
+  if (!brief.title || brief.title.length < 8) issues.push('title_too_short');
+  if (!brief.description || brief.description.length < 40) issues.push('description_too_short');
+  if (!brief.bullets || brief.bullets.length < 3) issues.push('bullets_lt_3');
+  if (!brief.mediaPlan?.images || brief.mediaPlan.images.length < 5) issues.push('images_plan_lt_5');
+  if (!brief.mediaPlan?.videos || brief.mediaPlan.videos.length < 2) issues.push('videos_plan_lt_2');
+  return { ok: issues.length === 0, issues };
+}
+
+export const CONTENT_META = {
+  block: 61,
+  features: ['landing_html', 'creative_brief', 'media_plan_5img_2vid', 'seo_basic'],
+  note: 'Block 61: brief creativo. Imagenes/videos reales = bloques 62-63.',
+};
