@@ -126,6 +126,14 @@ import {
   cjSpendPolicy,
   dailyOperatorChecklist,
 } from '../../../packages/release/src/index';
+import {
+  CONTENT_META,
+  generateCreativeBrief,
+  validateBrief,
+  buildLandingHtml,
+  defaultMediaPlan,
+} from '../../../packages/content/src/index';
+
 
 import { alertOps, getNotifyStatus, sendTelegram } from '../../../packages/notify/src/index';
 
@@ -574,7 +582,7 @@ class HealthController {
       service: 'ecom-api',
       mode: MODE,
       timestamp: new Date().toISOString(),
-      block: 60,
+      block: 61,
       aiRouter: true,
       orchestrator: true,
       agentRuns: true,
@@ -2061,7 +2069,7 @@ class DashboardController {
     ];
     return {
       mode: process.env.ECOM_MODE || 'MOCK',
-      block: 60,
+      block: 61,
       kpis: {
         published,
         pendingApproval: pending,
@@ -2159,7 +2167,7 @@ class AnalyticsController {
     for (const p of products) byStatus[p.status] = (byStatus[p.status] || 0) + 1;
     return {
       mode: process.env.ECOM_MODE || 'MOCK',
-      block: 60,
+      block: 61,
       products: products.length,
       orders: orders.length,
       revenue,
@@ -2174,7 +2182,7 @@ class AnalyticsController {
   ) {
     return {
       mode: process.env.ECOM_MODE || 'MOCK',
-      block: 60,
+      block: 61,
       ...realizedMargin(body),
     };
   }
@@ -2197,7 +2205,7 @@ class AnalyticsController {
       productCost: body.productCost,
       shippingCost: body.shippingCost,
     });
-    return { mode: process.env.ECOM_MODE || 'MOCK', block: 60, ...result };
+    return { mode: process.env.ECOM_MODE || 'MOCK', block: 61, ...result };
   }
 
   @Post('underperformance')
@@ -2219,7 +2227,7 @@ class AnalyticsController {
       revenue: related.reduce((a, o) => a + Number(o.total || 0), 0),
       daysSincePublish: days,
     }, { minDays: body.minDays });
-    return { mode: process.env.ECOM_MODE || 'MOCK', block: 60, productId: p.id, days, orders: related.length, decision };
+    return { mode: process.env.ECOM_MODE || 'MOCK', block: 61, productId: p.id, days, orders: related.length, decision };
   }
 }
 
@@ -2345,12 +2353,12 @@ class DeployController {
   @Get('readiness')
   readiness() {
     const result = productionReadiness(process.env as any);
-    return { mode: process.env.ECOM_MODE || 'MOCK', block: 60, ...result };
+    return { mode: process.env.ECOM_MODE || 'MOCK', block: 61, ...result };
   }
 
   @Get('ci-hints')
   ci() {
-    return { mode: process.env.ECOM_MODE || 'MOCK', block: 60, steps: ciPipelineHint() };
+    return { mode: process.env.ECOM_MODE || 'MOCK', block: 61, steps: ciPipelineHint() };
   }
 }
 
@@ -2429,7 +2437,7 @@ class RealCloseController {
     const summary = summarizeVerification(items);
     return {
       mode: process.env.ECOM_MODE || 'MOCK',
-      block: 60,
+      block: 61,
       ...summary,
       inventoryDryRun: { toPause: inv.toPause, sample: inv.results.slice(0, 5) },
       nextActions: summary.ok
@@ -2500,7 +2508,7 @@ class RealCloseController {
       };
     });
     await writeAudit('TRACKING_SCAN', 'Order', 'batch', { count: items.length });
-    return { mode: process.env.ECOM_MODE || 'MOCK', block: 60, count: items.length, items };
+    return { mode: process.env.ECOM_MODE || 'MOCK', block: 61, count: items.length, items };
   }
 }
 
@@ -2554,7 +2562,7 @@ class CatalogQualityController {
     const summary = summarizeQuality(items);
     return {
       mode: process.env.ECOM_MODE || 'MOCK',
-      block: 60,
+      block: 61,
       ...summary,
       orphan,
       pendingApproval: pending.length,
@@ -2679,7 +2687,7 @@ class CatalogQualityController {
       confidence: Number(body?.confidence || 80),
       isFirstPublication: body?.isFirstPublication,
     });
-    return { mode: process.env.ECOM_MODE || 'MOCK', block: 60, policy };
+    return { mode: process.env.ECOM_MODE || 'MOCK', block: 61, policy };
   }
 }
 
@@ -2730,7 +2738,7 @@ class HardeningController {
 
     return {
       mode,
-      block: 60,
+      block: 61,
       ...summary,
       nextActions: summary.ok
         ? [
@@ -2792,7 +2800,7 @@ class HardeningController {
     const gate = realModeGate();
     return {
       mode: process.env.ECOM_MODE || 'MOCK',
-      block: 60,
+      block: 61,
       ...gate,
       instruction:
         'Para entrar a REAL: completar criticals, set ECOM_REAL_CONFIRM=I_UNDERSTAND_REAL_MODE, luego ECOM_MODE=REAL y recreate. Kill switch debe estar OFF.',
@@ -3016,7 +3024,7 @@ class ReleaseController {
 
     return {
       mode,
-      block: 60,
+      block: 61,
       ...summary,
       nextActions: summary.readyForSandboxOps
         ? [
@@ -3178,8 +3186,127 @@ class ReleaseController {
   }
 }
 
+
+@Controller('creative')
+class CreativeController {
+  @Get('meta')
+  meta() {
+    return { mode: process.env.ECOM_MODE || 'MOCK', ...CONTENT_META };
+  }
+
+  @Post('brief')
+  async brief(
+    @Body()
+    body: {
+      title?: string;
+      productId?: string;
+      facts?: string;
+      category?: string;
+      forceMock?: boolean;
+      persist?: boolean;
+    },
+  ) {
+    let rawTitle = body?.title || '';
+    let facts = body?.facts || '';
+    let product: any = null;
+
+    if (body?.productId) {
+      product = await prisma.product.findUnique({
+        where: { id: body.productId },
+        include: { suppliers: true },
+      });
+      if (!product) return { error: 'not_found' };
+      rawTitle = product.title;
+      facts =
+        facts ||
+        `precio=${product.salePrice} ${product.currency || 'COP'}; costo=${product.productCost}; envio=${product.shippingCost}; stock=${product.stock}; margen=${product.marginPercent}`;
+    }
+
+    if (!rawTitle) return { error: 'title_or_productId_required' };
+
+    const result = await generateCreativeBrief({
+      rawTitle,
+      facts,
+      category: body?.category,
+      countryCode: 'CO',
+      currency: product?.currency || 'COP',
+      salePrice: product?.salePrice != null ? Number(product.salePrice) : undefined,
+      forceMock: body?.forceMock === true,
+    });
+
+    const validation = validateBrief(result.brief);
+
+    if (body?.persist && product) {
+      await prisma.product.update({
+        where: { id: product.id },
+        data: {
+          title: result.brief.title,
+          description: result.brief.description,
+        },
+      });
+      await writeAudit('CREATIVE_BRIEF', 'Product', product.id, {
+        source: result.brief.source,
+        provider: result.brief.provider,
+      });
+    }
+
+    return {
+      mode: process.env.ECOM_MODE || 'MOCK',
+      block: 61,
+      productId: product?.id || null,
+      validation,
+      brief: result.brief,
+      aiMeta: result.ai
+        ? {
+            provider: result.ai.provider,
+            model: result.ai.model,
+            mock: result.ai.mock,
+            latencyMs: result.ai.latencyMs,
+            error: result.ai.error,
+          }
+        : null,
+    };
+  }
+
+  @Post('landing-preview')
+  async landingPreview(
+    @Body() body: { productId?: string; title?: string; description?: string; imageUrl?: string },
+  ) {
+    let title = body?.title || 'Producto';
+    let description = body?.description || '';
+    let salePrice: any = null;
+    let currency = 'COP';
+    let imageUrl = body?.imageUrl || null;
+
+    if (body?.productId) {
+      const p = await prisma.product.findUnique({ where: { id: body.productId } });
+      if (!p) return { error: 'not_found' };
+      title = p.title;
+      description = p.description || description;
+      salePrice = p.salePrice;
+      currency = p.currency || 'COP';
+    }
+
+    const html = buildLandingHtml({
+      title,
+      description,
+      salePrice,
+      currency,
+      imageUrl,
+      countryCode: 'CO',
+    });
+
+    return {
+      mode: process.env.ECOM_MODE || 'MOCK',
+      block: 61,
+      html,
+      bytes: html.length,
+    };
+  }
+}
+
 @Module({
-  controllers: [ReleaseController, HardeningController, CatalogQualityController, RealCloseController, SeoController, AdsController, DeployController, TrendsController, MarketingController, AnalyticsController, ScoringController, ContentController, DashboardController, OpsController, 
+  controllers: [CreativeController, ReleaseController, HardeningController, CatalogQualityController, RealCloseController, SeoController, AdsController, DeployController, TrendsController, MarketingController, AnalyticsController, ScoringController, ContentController, DashboardController, OpsController, 
     HealthController,
     DiscoveryController,
     JobsController,
@@ -3252,7 +3379,7 @@ async function bootstrap() {
   }
   try {
     startDiscoveryScheduler();
-  void alertOps('BOOT', { service: 'ecom-api', block: 60 });
+  void alertOps('BOOT', { service: 'ecom-api', block: 61 });
   } catch (e: any) {
     console.warn('[queue] scheduler not started:', e?.message);
   }
