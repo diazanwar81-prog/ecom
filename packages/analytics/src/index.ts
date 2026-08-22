@@ -7,13 +7,8 @@ import {
   calculateMargin,
   decidePriceChange,
   RULES,
+  type CostBreakdown,
 } from '../../rules/src/index';
-
-export type OrderLineLike = {
-  price: number;
-  quantity?: number;
-  title?: string;
-};
 
 export type ProductPerf = {
   productId: string;
@@ -30,16 +25,16 @@ export function realizedMargin(input: {
   saleTotal: number;
   productCost: number;
   shippingCost: number;
-  feesPct?: number; // e.g. 0.03 Shopify-ish
+  feesPct?: number;
 }): { marginPercent: number; band: string; net: number } {
   const fees = (input.feesPct ?? 0.03) * input.saleTotal;
-  const cost = input.productCost + input.shippingCost + fees;
-  const net = input.saleTotal - cost;
-  const m = calculateMargin({
-    salePrice: input.saleTotal,
+  const costs: CostBreakdown = {
     productCost: input.productCost,
-    shippingCost: input.shippingCost + fees,
-  });
+    shippingCost: input.shippingCost,
+    platformFee: fees,
+  };
+  const m = calculateMargin({ salePrice: input.saleTotal, costs });
+  const net = input.saleTotal - m.totalCost;
   return {
     marginPercent: m.marginPercent,
     band: m.band,
@@ -47,7 +42,6 @@ export function realizedMargin(input: {
   };
 }
 
-/** Underperformance: no orders after window + low score → suggest pause */
 export function underperformanceDecision(
   p: ProductPerf,
   opts: { minDays?: number; minOrders?: number } = {},
@@ -64,15 +58,9 @@ export function underperformanceDecision(
     return { shouldPause: false, reason: 'has_orders' };
   }
   if ((p.opportunityScore ?? 100) >= 70 && p.ordersCount === 0) {
-    return {
-      shouldPause: false,
-      reason: 'high_score_keep_testing',
-    };
+    return { shouldPause: false, reason: 'high_score_keep_testing' };
   }
-  return {
-    shouldPause: true,
-    reason: `no_orders_after_${minDays}d`,
-  };
+  return { shouldPause: true, reason: `no_orders_after_${minDays}d` };
 }
 
 export function proposePriceChange(input: {
@@ -87,18 +75,24 @@ export function proposePriceChange(input: {
   projectedMargin?: number;
   decision: ReturnType<typeof decidePriceChange>;
 } {
-  const decision = decidePriceChange({
-    currentPrice: input.currentPrice,
-    newPrice: input.newPrice,
-    changesToday: input.changesToday,
-  });
-  const m = calculateMargin({
-    salePrice: input.newPrice,
+  const costs: CostBreakdown = {
     productCost: input.productCost,
     shippingCost: input.shippingCost,
+  };
+  const decision = decidePriceChange({
+    currentPrice: input.currentPrice,
+    proposedPrice: input.newPrice,
+    changesToday: input.changesToday,
+    costs,
   });
-  if (!decision.ok) {
-    return { allowed: false, reason: decision.reason, decision, projectedMargin: m.marginPercent };
+  const m = calculateMargin({ salePrice: input.newPrice, costs });
+  if (!decision.allowed) {
+    return {
+      allowed: false,
+      reason: decision.reason,
+      decision,
+      projectedMargin: m.marginPercent,
+    };
   }
   if (m.band === 'PAUSE' || m.marginPercent < RULES.MARGIN_MIN) {
     return {
