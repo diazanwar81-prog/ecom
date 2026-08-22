@@ -5,7 +5,7 @@ import re
 MAIN = Path(__file__).resolve().parents[1] / "apps/api/src/main.ts"
 t = MAIN.read_text()
 
-if "class RealCloseController" in t and "block: 40" in t and "packages/real-close" in t:
+if "class RealCloseController" in t and "packages/real-close" in t and "/real/verify" in t:
     print("already 37-40")
     raise SystemExit(0)
 
@@ -18,6 +18,7 @@ if "packages/real-close/src/index" not in t:
   extractTrackingFromNote,
   verifyTracking,
   summarizeVerification,
+  testWebhookHmac,
   REAL_CLOSE_META,
 } from '../../../packages/real-close/src/index';
 """
@@ -41,7 +42,6 @@ class RealCloseController {
     return { mode: process.env.ECOM_MODE || 'MOCK', ...REAL_CLOSE_META };
   }
 
-  /** Auto-verificación bloques 37–40 */
   @Get('verify')
   async verify() {
     const items = [...verifyHttpsAndWebhooks()];
@@ -67,7 +67,6 @@ class RealCloseController {
       }),
     );
 
-    // Inventory policy dry-run (block 39)
     const inv = applyInventoryPolicy(
       products.map((p) => ({
         productId: p.id,
@@ -83,7 +82,6 @@ class RealCloseController {
       }),
     );
 
-    // Tracking parse (block 40)
     let withSupplierId = 0;
     let withTracking = 0;
     for (const o of orders.filter((x) => x.status === 'FULFILLED')) {
@@ -117,9 +115,8 @@ class RealCloseController {
 
   @Post('webhook/hmac-test')
   hmacTest(@Body() body: any, @Headers('x-shopify-hmac-sha256') hmac?: string) {
-    const secret = process.env.SHOPIFY_WEBHOOK_SECRET || '';
     const raw = JSON.stringify(body ?? {});
-    const ok = verifyShopifyHmac(raw, hmac, secret);
+    const ok = testWebhookHmac(raw, hmac);
     return {
       mode: process.env.ECOM_MODE || 'MOCK',
       block: 37,
@@ -130,7 +127,7 @@ class RealCloseController {
 
   @Post('inventory/apply-pauses')
   async applyPauses(@Body() body: { dryRun?: boolean }) {
-    const dryRun = body?.dryRun !== false; // default dry-run true for safety
+    const dryRun = body?.dryRun !== false;
     const products = await prisma.product.findMany({ take: 200 });
     const inv = applyInventoryPolicy(
       products.map((p) => ({
@@ -142,10 +139,7 @@ class RealCloseController {
     const paused: string[] = [];
     if (!dryRun) {
       for (const id of inv.toPause) {
-        await prisma.product.update({
-          where: { id },
-          data: { status: 'PAUSED' },
-        });
+        await prisma.product.update({ where: { id }, data: { status: 'PAUSED' } });
         await writeAudit('AUTO_PAUSE_STOCK', 'Product', id, { reason: 'stock_zero' });
         paused.push(id);
       }
@@ -194,20 +188,6 @@ section = t.split("controllers:")[1][:700] if "controllers:" in t else ""
 if "RealCloseController" not in section:
     t = re.sub(r"(controllers:\s*\[)", r"\1RealCloseController, ", t, count=1)
     print("registered RealCloseController")
-
-# ensure verifyShopifyHmac imported from ops if used in controller - already from real-close
-# RealCloseController uses verifyShopifyHmac - need it in scope from ops
-if "verifyShopifyHmac" not in t.split("packages/ops")[0][-500:] if "packages/ops" in t else "":
-    pass
-
-if "verifyShopifyHmac" not in t:
-    # add to ops import if exists
-    if "packages/ops/src/index" in t and "verifyShopifyHmac" not in t:
-        t = t.replace(
-            "from '../../../packages/ops/src/index';",
-            "verifyShopifyHmac,\n} from '../../../packages/ops/src/index';",
-            1,
-        )
 
 MAIN.write_text(t)
 print("done 37-40")
