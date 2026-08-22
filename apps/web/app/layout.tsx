@@ -1,5 +1,6 @@
 import type { Metadata } from 'next';
 import type { ReactNode } from 'react';
+import { Providers } from './providers';
 
 export const metadata: Metadata = {
   title: 'ECOM',
@@ -7,5 +8,11 @@ export const metadata: Metadata = {
 };
 
 export default function RootLayout({ children }: Readonly<{ children: ReactNode }>) {
-  return <html lang="es"><body>{children}</body></html>;
+  return (
+    <html lang="es">
+      <body>
+        <Providers>{children}</Providers>
+      </body>
+    </html>
+  );
 }
