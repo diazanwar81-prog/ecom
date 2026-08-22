@@ -23,12 +23,14 @@ function envBool(name: string, defaultValue = false): boolean {
   return v === '1' || v === 'true' || v === 'yes' || v === 'on';
 }
 
+/** Positive number helper: empty or non-positive → fallback */
 function envNum(name: string, fallback: number): number {
-  const n = Number(env(name));
-  return Number.isFinite(n) ? n : fallback;
+  const raw = env(name);
+  if (!raw) return fallback;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return fallback;
+  return n;
 }
-
-// ─── Block 45: Shopify title sync helpers ───────────────────────────────────
 
 export function needsShopifyTitleSync(localTitle: string, remoteTitle?: string | null): boolean {
   if (!remoteTitle) return true;
@@ -55,8 +57,6 @@ export function planTitleSync(
     }));
 }
 
-// ─── Block 46: robust tracking parse ────────────────────────────────────────
-
 export type ParsedTracking = {
   supplierOrderId: string | null;
   trackingNumber: string | null;
@@ -72,10 +72,6 @@ export function parseFulfillmentNote(note?: string | null): ParsedTracking {
     return { supplierOrderId: null, trackingNumber: null, carrier: null, isPlaceholder: true };
   }
 
-  // Formats seen:
-  // CJ LIVE · cj-1787… · tracking MOCKTRACK… · CJPacket Ordinary
-  // CJ LIVE · auto · cj-1787… · CJPacket Ordinary
-  // CJ MOCK · mock-cj-… · tracking MOCKTRACK… · MOCK-Logistics
   const supplier =
     raw.match(/\b(cj[-_][a-z0-9]+|mock-cj[-_][a-z0-9]+)\b/i)?.[1] ||
     raw.match(/CJ\s+(?:LIVE|MOCK)\s*[·|]\s*([^·|\s]+)/i)?.[1] ||
@@ -83,7 +79,7 @@ export function parseFulfillmentNote(note?: string | null): ParsedTracking {
 
   let tracking =
     raw.match(/tracking\s*[:=]?\s*([A-Z0-9-]{6,})/i)?.[1] ||
-    raw.match(/\b([A-Z]{2}\d{9,}[A-Z]{0,2})\b/)?.[1] || // common intl patterns
+    raw.match(/\b([A-Z]{2}\d{9,}[A-Z]{0,2})\b/)?.[1] ||
     null;
 
   if (tracking && PLACEHOLDER_TRACKING.test(tracking)) tracking = null;
@@ -121,8 +117,6 @@ export function scoreTrackingQuality(notes: (string | null | undefined)[]): {
   return { total: notes.length, withSupplierId, withRealTracking, placeholders };
 }
 
-// ─── Block 47: Telegram status (uses env; send lives in @ecom/notify) ───────
-
 export function telegramConfigured(): {
   configured: boolean;
   enabled: boolean;
@@ -134,8 +128,6 @@ export function telegramConfigured(): {
   const enabled = env('ECOM_TELEGRAM_ALERTS', 'true') !== 'false';
   return { configured: tokenSet && chatIdSet, enabled, tokenSet, chatIdSet };
 }
-
-// ─── Block 48: budget / rate gates ──────────────────────────────────────────
 
 export type BudgetSnapshot = {
   maxNewProductsPerDay: number;
@@ -183,8 +175,6 @@ export function budgetGate(
   };
 }
 
-// ─── Block 49: kill switch ──────────────────────────────────────────────────
-
 export type KillSwitchState = {
   active: boolean;
   reason: string;
@@ -215,8 +205,6 @@ export function assertNotKilled(action: string): { ok: boolean; error?: string }
     error: `KILL_SWITCH activo — acción bloqueada: ${action}. Motivo: ${ks.reason}`,
   };
 }
-
-// ─── Block 50: ops board summary ────────────────────────────────────────────
 
 export function buildOpsBoard(input: {
   mode: string;
@@ -282,8 +270,6 @@ export function buildOpsBoard(input: {
   return { healthLabel, headline, cards };
 }
 
-// ─── Block 51: smoke test definitions ───────────────────────────────────────
-
 export type SmokeCheck = {
   id: string;
   name: string;
@@ -306,7 +292,6 @@ export const SMOKE_CHECKS: SmokeCheck[] = [
 export function runLocalSmokeUnits(): HardItem[] {
   const items: HardItem[] = [];
 
-  // tracking parser unit
   const sample = parseFulfillmentNote(
     'CJ LIVE · cj-1787333138969 · tracking n/a · CJPacket Ordinary',
   );
@@ -347,8 +332,6 @@ export function runLocalSmokeUnits(): HardItem[] {
 
   return items;
 }
-
-// ─── Block 52: REAL mode gate ───────────────────────────────────────────────
 
 export type RealGateItem = { key: string; ok: boolean; critical: boolean; note: string };
 
@@ -399,7 +382,7 @@ export function realModeGate(envMap?: Record<string, string | undefined>): {
     },
     {
       key: 'KILL_SWITCH_OFF',
-      ok: !envBool('ECOM_KILL_SWITCH', false) && !envBool('ECOM_PAUSE_ALL', false),
+      ok: !(get('ECOM_KILL_SWITCH') === 'true' || get('ECOM_PAUSE_ALL') === 'true'),
       critical: true,
       note: 'Kill switch debe estar OFF para entrar a REAL',
     },
@@ -439,8 +422,6 @@ export function realModeGate(envMap?: Record<string, string | undefined>): {
     items,
   };
 }
-
-// ─── Aggregate verify 45–52 ─────────────────────────────────────────────────
 
 export function verifyHardening(input: {
   publishedWithExternal: number;
@@ -513,7 +494,7 @@ export function verifyHardening(input: {
   items.push({
     id: 'kill_switch',
     block: 49,
-    ok: true, // presence is enough; active is operational state not failure
+    ok: true,
     severity: ks.active ? 'warning' : 'info',
     message: ks.active ? `KILL SWITCH ON — ${ks.reason}` : 'Kill switch OFF',
     data: ks as any,
@@ -546,7 +527,7 @@ export function verifyHardening(input: {
   items.push({
     id: 'real_mode_gate',
     block: 52,
-    ok: true, // informational unless user forces REAL without gate
+    ok: true,
     severity: realGate.canEnterReal ? 'info' : 'warning',
     message: realGate.canEnterReal
       ? `Listo para REAL (score ${realGate.score}) — aún requiere confirmación humana`
