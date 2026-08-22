@@ -1,4 +1,4 @@
-/** Lightweight Telegram notifier for ECOM ops alerts. */
+/** Lightweight Telegram notifier for ECOM ops alerts (mensajes en español). */
 
 function env(name: string, fallback = ''): string {
   return (process.env[name] || fallback).trim();
@@ -46,12 +46,46 @@ export async function sendTelegram(text: string): Promise<{ ok: boolean; skipped
   }
 }
 
+const EVENT_ES: Record<string, string> = {
+  BOOT: 'Arranque del sistema',
+  STOCK_ZERO: 'Stock en cero',
+  STOCK_PAUSE: 'Producto en pausa',
+  FULFILL_FAILED: 'Fulfillment fallido',
+  FULFILL_OK: 'Pedido enviado a CJ',
+  GO_LIVE: 'Producto publicado',
+  PUBLISH_FAILED: 'Publicación fallida',
+  DISCOVERY_ERROR: 'Error en discovery',
+  JOB_ERROR: 'Error en job',
+};
+
+const FIELD_ES: Record<string, string> = {
+  mode: 'modo',
+  service: 'servicio',
+  block: 'bloque',
+  productId: 'producto',
+  title: 'título',
+  stock: 'stock',
+  marginBand: 'banda de margen',
+  orderId: 'pedido',
+  orderNumber: 'número de pedido',
+  error: 'error',
+  reason: 'motivo',
+  externalId: 'id externo',
+  sku: 'SKU',
+  supplierOrderId: 'orden proveedor',
+};
+
 export async function alertOps(event: string, details: Record<string, unknown> = {}) {
   const mode = process.env.ECOM_MODE || 'MOCK';
-  const lines = [
-    `ECOM · ${event}`,
-    `mode=${mode}`,
-    ...Object.entries(details).map(([k, v]) => `${k}: ${typeof v === 'object' ? JSON.stringify(v) : v}`),
-  ];
+  const title = EVENT_ES[event] || event;
+  const lines = [`ECOM · ${title}`, `modo: ${mode}`];
+
+  for (const [k, v] of Object.entries(details)) {
+    if (k === 'mode') continue;
+    const label = FIELD_ES[k] || k;
+    const value = typeof v === 'object' ? JSON.stringify(v) : String(v ?? '');
+    lines.push(`${label}: ${value}`);
+  }
+
   return sendTelegram(lines.join('\n'));
 }
