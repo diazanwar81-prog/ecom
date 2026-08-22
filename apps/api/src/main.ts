@@ -1504,6 +1504,16 @@ class ProductsController {
       },
     });
     void alertOps('GO_LIVE', { productId: id, title: String((enriched as any)?.title || '').slice(0, 80) });
+    // close all PENDING approvals for this product so panel clears
+    try {
+      await prisma.approval.updateMany({
+        where: { productId: id, status: 'PENDING' },
+        data: { status: 'APPROVED', decidedAt: new Date() },
+      });
+    } catch (e: any) {
+      console.warn('close pending approvals failed', e?.message);
+    }
+
     await writeAudit('PRODUCT_GO_LIVE', 'Product', id, {
       shopify: result.externalId,
       cjVariantId: enriched.cjVariantId,
