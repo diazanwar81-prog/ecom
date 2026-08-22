@@ -2323,11 +2323,17 @@ class RealCloseController {
   async verify() {
     const items = [...verifyHttpsAndWebhooks()];
 
-    const products = await prisma.product.findMany({ take: 200 });
+    const products = await prisma.product.findMany({
+      take: 200,
+      include: { suppliers: true },
+    });
     const orders = await prisma.order.findMany({ take: 200 });
-    const publishedWithCj = products.filter(
-      (p) => p.status === 'PUBLISHED' && ((p as any).cjVariantId || (p as any).cjSku),
-    ).length;
+    const publishedWithCj = products.filter((p) => {
+      if (p.status !== 'PUBLISHED') return false;
+      return (p.suppliers || []).some(
+        (s: any) => Boolean(s.cjVariantId || s.cjSku),
+      );
+    }).length;
     const ordersPaid = orders.filter((o) => o.status === 'PAID').length;
     const ordersFulfilled = orders.filter((o) => o.status === 'FULFILLED').length;
 
@@ -2345,11 +2351,14 @@ class RealCloseController {
     );
 
     const inv = applyInventoryPolicy(
-      products.map((p) => ({
-        productId: p.id,
-        stock: (p as any).stock ?? null,
-        status: p.status,
-      })),
+      products.map((p) => {
+        const primary = (p.suppliers || []).find((s: any) => s.isPrimary) || (p.suppliers || [])[0];
+        return {
+          productId: p.id,
+          stock: primary?.stock ?? null,
+          status: p.status,
+        };
+      }),
     );
     items.push(
       ...verifyInventoryLoop({
