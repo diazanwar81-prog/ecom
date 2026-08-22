@@ -115,6 +115,18 @@ import {
   runLocalSmokeUnits,
   needsShopifyTitleSync,
 } from '../../../packages/hardening/src/index';
+import {
+  RELEASE_META,
+  verifyRelease,
+  classifyShopifyLink,
+  rankApprovalQueue,
+  httpsMonitor,
+  webhookReadiness,
+  pipelineSnapshot,
+  cjSpendPolicy,
+  dailyOperatorChecklist,
+} from '../../../packages/release/src/index';
+
 import { alertOps, getNotifyStatus, sendTelegram } from '../../../packages/notify/src/index';
 
 
@@ -562,7 +574,7 @@ class HealthController {
       service: 'ecom-api',
       mode: MODE,
       timestamp: new Date().toISOString(),
-      block: 52,
+      block: 60,
       aiRouter: true,
       orchestrator: true,
       agentRuns: true,
@@ -2049,7 +2061,7 @@ class DashboardController {
     ];
     return {
       mode: process.env.ECOM_MODE || 'MOCK',
-      block: 52,
+      block: 60,
       kpis: {
         published,
         pendingApproval: pending,
@@ -2147,7 +2159,7 @@ class AnalyticsController {
     for (const p of products) byStatus[p.status] = (byStatus[p.status] || 0) + 1;
     return {
       mode: process.env.ECOM_MODE || 'MOCK',
-      block: 52,
+      block: 60,
       products: products.length,
       orders: orders.length,
       revenue,
@@ -2162,7 +2174,7 @@ class AnalyticsController {
   ) {
     return {
       mode: process.env.ECOM_MODE || 'MOCK',
-      block: 52,
+      block: 60,
       ...realizedMargin(body),
     };
   }
@@ -2185,7 +2197,7 @@ class AnalyticsController {
       productCost: body.productCost,
       shippingCost: body.shippingCost,
     });
-    return { mode: process.env.ECOM_MODE || 'MOCK', block: 52, ...result };
+    return { mode: process.env.ECOM_MODE || 'MOCK', block: 60, ...result };
   }
 
   @Post('underperformance')
@@ -2207,7 +2219,7 @@ class AnalyticsController {
       revenue: related.reduce((a, o) => a + Number(o.total || 0), 0),
       daysSincePublish: days,
     }, { minDays: body.minDays });
-    return { mode: process.env.ECOM_MODE || 'MOCK', block: 52, productId: p.id, days, orders: related.length, decision };
+    return { mode: process.env.ECOM_MODE || 'MOCK', block: 60, productId: p.id, days, orders: related.length, decision };
   }
 }
 
@@ -2333,12 +2345,12 @@ class DeployController {
   @Get('readiness')
   readiness() {
     const result = productionReadiness(process.env as any);
-    return { mode: process.env.ECOM_MODE || 'MOCK', block: 52, ...result };
+    return { mode: process.env.ECOM_MODE || 'MOCK', block: 60, ...result };
   }
 
   @Get('ci-hints')
   ci() {
-    return { mode: process.env.ECOM_MODE || 'MOCK', block: 52, steps: ciPipelineHint() };
+    return { mode: process.env.ECOM_MODE || 'MOCK', block: 60, steps: ciPipelineHint() };
   }
 }
 
@@ -2417,7 +2429,7 @@ class RealCloseController {
     const summary = summarizeVerification(items);
     return {
       mode: process.env.ECOM_MODE || 'MOCK',
-      block: 52,
+      block: 60,
       ...summary,
       inventoryDryRun: { toPause: inv.toPause, sample: inv.results.slice(0, 5) },
       nextActions: summary.ok
@@ -2488,7 +2500,7 @@ class RealCloseController {
       };
     });
     await writeAudit('TRACKING_SCAN', 'Order', 'batch', { count: items.length });
-    return { mode: process.env.ECOM_MODE || 'MOCK', block: 52, count: items.length, items };
+    return { mode: process.env.ECOM_MODE || 'MOCK', block: 60, count: items.length, items };
   }
 }
 
@@ -2542,7 +2554,7 @@ class CatalogQualityController {
     const summary = summarizeQuality(items);
     return {
       mode: process.env.ECOM_MODE || 'MOCK',
-      block: 52,
+      block: 60,
       ...summary,
       orphan,
       pendingApproval: pending.length,
@@ -2667,7 +2679,7 @@ class CatalogQualityController {
       confidence: Number(body?.confidence || 80),
       isFirstPublication: body?.isFirstPublication,
     });
-    return { mode: process.env.ECOM_MODE || 'MOCK', block: 52, policy };
+    return { mode: process.env.ECOM_MODE || 'MOCK', block: 60, policy };
   }
 }
 
@@ -2718,7 +2730,7 @@ class HardeningController {
 
     return {
       mode,
-      block: 52,
+      block: 60,
       ...summary,
       nextActions: summary.ok
         ? [
@@ -2780,7 +2792,7 @@ class HardeningController {
     const gate = realModeGate();
     return {
       mode: process.env.ECOM_MODE || 'MOCK',
-      block: 52,
+      block: 60,
       ...gate,
       instruction:
         'Para entrar a REAL: completar criticals, set ECOM_REAL_CONFIRM=I_UNDERSTAND_REAL_MODE, luego ECOM_MODE=REAL y recreate. Kill switch debe estar OFF.',
@@ -2940,8 +2952,234 @@ class HardeningController {
   }
 }
 
+
+@Controller('release')
+class ReleaseController {
+  @Get('meta')
+  meta() {
+    return { mode: process.env.ECOM_MODE || 'MOCK', ...RELEASE_META };
+  }
+
+  @Get('verify')
+  async verify() {
+    const mode = process.env.ECOM_MODE || 'MOCK';
+    const products = await prisma.product.findMany({ take: 400, include: { suppliers: true } });
+    const orders = await prisma.order.findMany({ take: 400 });
+    const published = products.filter((p) => p.status === 'PUBLISHED');
+    const pending = products.filter((p) => p.status === 'PENDING_APPROVAL');
+    const paid = orders.filter((o) => o.status === 'PAID');
+    const fulfilled = orders.filter((o) => o.status === 'FULFILLED');
+    const orphanPublished = published.filter(
+      (p) => !(p.suppliers || []).some((s: any) => s.cjVariantId || s.cjSku),
+    ).length;
+    const https = httpsMonitor();
+    const webhook = webhookReadiness();
+
+    // light reconcile sample (HEAD product existence) — only first 15 live ids
+    let missingOnShopify = 0;
+    const shop = (process.env.SHOPIFY_SHOP_DOMAIN || process.env.SHOPIFY_SHOP || '').trim();
+    const token = (process.env.SHOPIFY_ACCESS_TOKEN || '').trim();
+    const host = shop.includes('.') ? shop : shop ? `${shop}.myshopify.com` : '';
+    const apiVersion = process.env.SHOPIFY_API_VERSION || '2026-07';
+    if (host && token) {
+      const sample = published
+        .filter((p) => p.externalId && !String(p.externalId).startsWith('mock-'))
+        .slice(0, 15);
+      for (const p of sample) {
+        try {
+          const res = await fetch(
+            `https://${host}/admin/api/${apiVersion}/products/${p.externalId}.json`,
+            { headers: { 'X-Shopify-Access-Token': token }, method: 'GET' },
+          );
+          if (res.status === 404) missingOnShopify++;
+        } catch {
+          /* ignore network blips in verify */
+        }
+      }
+    }
+
+    const summary = verifyRelease({
+      missingOnShopify,
+      pendingApproval: pending.length,
+      paidUnfulfilled: paid.length,
+      orphanPublished,
+      killSwitch:
+        process.env.ECOM_KILL_SWITCH === 'true' || process.env.ECOM_PAUSE_ALL === 'true',
+      httpsOk: https.ok,
+      webhookOk: webhook.ok,
+      published: published.length,
+      paid: paid.length,
+      fulfilled: fulfilled.length,
+      catalogScore: 100,
+      hardeningScore: 100,
+    });
+
+    return {
+      mode,
+      block: 60,
+      ...summary,
+      nextActions: summary.readyForSandboxOps
+        ? [
+            'Ops SANDBOX listo',
+            'Revisar cola: GET /release/approvals',
+            'Reconcile: POST /release/reconcile-shopify {"dryRun":true}',
+            'REAL solo con ECOM_REAL_CONFIRM + /hardening/real-gate',
+          ]
+        : summary.items.filter((i) => !i.ok).map((i) => i.message),
+    };
+  }
+
+  @Get('approvals')
+  async approvals() {
+    const products = await prisma.product.findMany({
+      where: { status: 'PENDING_APPROVAL' },
+      take: 50,
+      include: { suppliers: true },
+      orderBy: { updatedAt: 'desc' },
+    });
+    const ranked = rankApprovalQueue(
+      products.map((p) => ({
+        id: p.id,
+        title: p.title,
+        opportunityScore: p.opportunityScore,
+        confidence: p.confidence,
+        marginPercent: p.marginPercent as any,
+        hasCj: (p.suppliers || []).some((s: any) => s.cjVariantId || s.cjSku),
+        status: p.status,
+      })),
+    );
+    return {
+      mode: process.env.ECOM_MODE || 'MOCK',
+      block: 54,
+      count: ranked.length,
+      items: ranked,
+    };
+  }
+
+  @Get('https')
+  https() {
+    return { mode: process.env.ECOM_MODE || 'MOCK', block: 55, ...httpsMonitor() };
+  }
+
+  @Get('webhook')
+  webhook() {
+    return { mode: process.env.ECOM_MODE || 'MOCK', block: 56, ...webhookReadiness() };
+  }
+
+  @Get('pipeline')
+  async pipeline() {
+    const products = await prisma.product.findMany({ take: 500 });
+    const orders = await prisma.order.findMany({ take: 500 });
+    const snap = pipelineSnapshot({
+      detected: products.filter((p) => p.status === 'DETECTED').length,
+      evaluating: products.filter((p) => p.status === 'EVALUATING').length,
+      pending: products.filter((p) => p.status === 'PENDING_APPROVAL').length,
+      published: products.filter((p) => p.status === 'PUBLISHED').length,
+      paused: products.filter((p) => p.status === 'PAUSED').length,
+      paid: orders.filter((o) => o.status === 'PAID').length,
+      fulfilled: orders.filter((o) => o.status === 'FULFILLED').length,
+    });
+    return { mode: process.env.ECOM_MODE || 'MOCK', block: 57, ...snap };
+  }
+
+  @Get('checklist')
+  async checklist() {
+    const products = await prisma.product.findMany({ take: 400, include: { suppliers: true } });
+    const orders = await prisma.order.findMany({ take: 400 });
+    const published = products.filter((p) => p.status === 'PUBLISHED');
+    const items = dailyOperatorChecklist({
+      pendingApproval: products.filter((p) => p.status === 'PENDING_APPROVAL').length,
+      paidUnfulfilled: orders.filter((o) => o.status === 'PAID').length,
+      orphanPublished: published.filter(
+        (p) => !(p.suppliers || []).some((s: any) => s.cjVariantId || s.cjSku),
+      ).length,
+      killSwitch:
+        process.env.ECOM_KILL_SWITCH === 'true' || process.env.ECOM_PAUSE_ALL === 'true',
+      httpsOk: httpsMonitor().ok,
+    });
+    return { mode: process.env.ECOM_MODE || 'MOCK', block: 59, items };
+  }
+
+  @Post('reconcile-shopify')
+  async reconcile(@Body() body: { dryRun?: boolean; limit?: number; clearMissing?: boolean }) {
+    const dryRun = body?.dryRun !== false;
+    const clearMissing = body?.clearMissing === true;
+    const limit = Math.min(Number(body?.limit || 20), 40);
+    const shop = (process.env.SHOPIFY_SHOP_DOMAIN || process.env.SHOPIFY_SHOP || '').trim();
+    const token = (process.env.SHOPIFY_ACCESS_TOKEN || '').trim();
+    if (!shop || !token) {
+      return { error: 'missing_shopify_creds' };
+    }
+    const host = shop.includes('.') ? shop : `${shop}.myshopify.com`;
+    const apiVersion = process.env.SHOPIFY_API_VERSION || '2026-07';
+
+    const products = await prisma.product.findMany({
+      where: { status: 'PUBLISHED' },
+      take: limit,
+      orderBy: { updatedAt: 'desc' },
+    });
+
+    const results: any[] = [];
+    for (const p of products) {
+      const base = classifyShopifyLink({ externalId: p.externalId, shopifyExists: null });
+      if (!p.externalId || String(p.externalId).startsWith('mock-')) {
+        results.push({ productId: p.id, externalId: p.externalId, ...base, ok: true });
+        continue;
+      }
+      try {
+        const res = await fetch(
+          `https://${host}/admin/api/${apiVersion}/products/${p.externalId}.json`,
+          { headers: { 'X-Shopify-Access-Token': token } },
+        );
+        if (res.status === 404) {
+          const cls = classifyShopifyLink({ externalId: p.externalId, shopifyExists: false });
+          if (!dryRun && clearMissing) {
+            await prisma.product.update({
+              where: { id: p.id },
+              data: { externalId: null, status: 'PENDING_APPROVAL' },
+            });
+            await writeAudit('SHOPIFY_RECONCILE_CLEAR', 'Product', p.id, {
+              externalId: p.externalId,
+            });
+            results.push({ productId: p.id, externalId: p.externalId, ...cls, cleared: true, ok: true });
+          } else {
+            results.push({ productId: p.id, externalId: p.externalId, ...cls, ok: true, dryRun });
+          }
+        } else if (res.ok) {
+          results.push({
+            productId: p.id,
+            externalId: p.externalId,
+            ...classifyShopifyLink({ externalId: p.externalId, shopifyExists: true }),
+            ok: true,
+          });
+        } else {
+          results.push({
+            productId: p.id,
+            externalId: p.externalId,
+            status: 'error',
+            http: res.status,
+            ok: false,
+          });
+        }
+      } catch (e: any) {
+        results.push({ productId: p.id, externalId: p.externalId, ok: false, error: e?.message || String(e) });
+      }
+    }
+
+    return {
+      mode: process.env.ECOM_MODE || 'MOCK',
+      block: 53,
+      dryRun,
+      clearMissing,
+      scanned: results.length,
+      missing: results.filter((r) => r.status === 'missing_on_shopify').length,
+      results,
+    };
+  }
+}
+
 @Module({
-  controllers: [HardeningController, CatalogQualityController, RealCloseController, SeoController, AdsController, DeployController, TrendsController, MarketingController, AnalyticsController, ScoringController, ContentController, DashboardController, OpsController, 
+  controllers: [ReleaseController, HardeningController, CatalogQualityController, RealCloseController, SeoController, AdsController, DeployController, TrendsController, MarketingController, AnalyticsController, ScoringController, ContentController, DashboardController, OpsController, 
     HealthController,
     DiscoveryController,
     JobsController,
@@ -3014,7 +3252,7 @@ async function bootstrap() {
   }
   try {
     startDiscoveryScheduler();
-  void alertOps('BOOT', { service: 'ecom-api', block: 52 });
+  void alertOps('BOOT', { service: 'ecom-api', block: 60 });
   } catch (e: any) {
     console.warn('[queue] scheduler not started:', e?.message);
   }
