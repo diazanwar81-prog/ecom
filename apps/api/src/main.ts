@@ -46,6 +46,11 @@ import {
 } from '../../../packages/queue/src/index';
 import { alertOps, getNotifyStatus, sendTelegram } from '../../../packages/notify/src/index';
 
+
+function isKillSwitchOn() {
+  return String(process.env.ECOM_KILL_SWITCH || '').toLowerCase() === 'true';
+}
+
 async function maybeAlertStock(product: {
   id?: string;
   title?: string;
@@ -124,6 +129,15 @@ async function ensureSupplierByName(name: string, verified: boolean) {
 }
 
 async function ingestCandidate(storeId: string, c: DiscoveredCandidate, runPipeline: boolean) {
+  // Dedupe by cjSku or exact title
+  if (c.cjSku) {
+    const bySku = await prisma.product.findFirst({
+      where: { storeId, suppliers: { some: { cjSku: c.cjSku } } },
+    });
+    if (bySku) {
+      return { productId: bySku.id, created: false, pipeline: null as any, skipped: true };
+    }
+  }
   const existing = await prisma.product.findFirst({
     where: { storeId, title: c.title },
   });
@@ -406,7 +420,7 @@ class HealthController {
       service: 'ecom-api',
       mode: MODE,
       timestamp: new Date().toISOString(),
-      block: 24,
+      block: 25,
       aiRouter: true,
       orchestrator: true,
       agentRuns: true,
@@ -952,6 +966,22 @@ class OrdersController {
       supplierOrderId: result.supplierOrderId || '',
       mock: result.mock,
     });
+    // AUTO_TRACKING_SYNC
+    try {
+      const shopifyOrderId = String(updated.externalId || '');
+      if (/^\d+$/.test(shopifyOrderId) && result.trackingNumber && result.trackingNumber !== 'n/a') {
+        const tr = await createOrderFulfillment({
+          orderId: shopifyOrderId,
+          trackingNumber: result.trackingNumber,
+          trackingCompany: result.carrier || 'CJPacket Ordinary',
+          notifyCustomer: false,
+        });
+        await writeAudit('AUTO_TRACKING_SYNC', 'Order', id, tr);
+      }
+    } catch (e: any) {
+      console.warn('auto tracking sync failed', e?.message);
+    }
+
     return {
       mode: MODE,
       fulfilled: true,
@@ -1457,6 +1487,7 @@ class ProductsController {
       }
     }
     if (!result.ok) {
+      void alertOps('PUBLISH_FAILED', { productId: id, error: 'go_live_failed' });
       await writeAudit('GO_LIVE_FAILED', 'Product', id, result);
       return { mode: MODE, error: 'publish_failed', approval, result, copy: copyMeta };
     }
@@ -1472,6 +1503,7 @@ class ProductsController {
         description: liveDescription || null,
       },
     });
+    void alertOps('GO_LIVE', { productId: id, title: String((enriched as any)?.title || '').slice(0, 80) });
     await writeAudit('PRODUCT_GO_LIVE', 'Product', id, {
       shopify: result.externalId,
       cjVariantId: enriched.cjVariantId,
@@ -1656,7 +1688,7 @@ async function bootstrap() {
   }
   try {
     startDiscoveryScheduler();
-  void alertOps('BOOT', { service: 'ecom-api', block: 24 });
+  void alertOps('BOOT', { service: 'ecom-api', block: 25 });
   } catch (e: any) {
     console.warn('[queue] scheduler not started:', e?.message);
   }
