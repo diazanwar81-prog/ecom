@@ -406,7 +406,7 @@ class HealthController {
       service: 'ecom-api',
       mode: MODE,
       timestamp: new Date().toISOString(),
-      block: 23,
+      block: 24,
       aiRouter: true,
       orchestrator: true,
       agentRuns: true,
@@ -824,6 +824,13 @@ class ShopifyController {
 
       if (!result.ok) {
         await writeAudit('AUTO_FULFILL_FAILED', 'Order', order.id, result);
+        void alertOps('FULFILL_FAILED', {
+          orderId: order.id,
+          orderNumber: order.orderNumber,
+          error: result.error || 'auto_fulfill_failed',
+          auto: true,
+          mock: result.mock,
+        });
         return {
           mode: MODE,
           order,
@@ -854,6 +861,12 @@ class ShopifyController {
       };
     } catch (e: any) {
       await writeAudit('AUTO_FULFILL_ERROR', 'Order', order.id, { error: e?.message });
+      void alertOps('FULFILL_FAILED', {
+        orderId: order.id,
+        orderNumber: order.orderNumber,
+        error: e?.message || 'auto_fulfill_error',
+        auto: true,
+      });
       return {
         mode: MODE,
         order,
@@ -915,7 +928,13 @@ class OrdersController {
 
     if (!result.ok) {
       await writeAudit('FULFILL_FAILED', 'Order', id, result);
-      return { mode: MODE, error: 'fulfill_failed' /* telegram via catch below */, result };
+      void alertOps('FULFILL_FAILED', {
+        orderId: id,
+        orderNumber: order.orderNumber,
+        error: result.error || 'fulfill_failed',
+        mock: result.mock,
+      });
+      return { mode: MODE, error: 'fulfill_failed', result };
     }
 
     const updated = await prisma.order.update({
@@ -927,6 +946,12 @@ class OrdersController {
     });
 
     await writeAudit('ORDER_FULFILLED', 'Order', id, result);
+    void alertOps('FULFILL_OK', {
+      orderId: id,
+      orderNumber: order.orderNumber,
+      supplierOrderId: result.supplierOrderId || '',
+      mock: result.mock,
+    });
     return {
       mode: MODE,
       fulfilled: true,
@@ -1631,7 +1656,7 @@ async function bootstrap() {
   }
   try {
     startDiscoveryScheduler();
-  void alertOps('BOOT', { service: 'ecom-api', block: 22 });
+  void alertOps('BOOT', { service: 'ecom-api', block: 24 });
   } catch (e: any) {
     console.warn('[queue] scheduler not started:', e?.message);
   }
