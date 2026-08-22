@@ -1,7 +1,7 @@
 /**
  * ECOM Content
  * - Block 29: landing HTML
- * - Block 61: creative product brief
+ * - Block 61: creative product brief (copy llamativo por nicho)
  */
 
 import { complete, type AiResponse } from '../../ai-router/src/index';
@@ -109,7 +109,8 @@ export type CreativeBrief = {
   seo: { metaTitle: string; metaDescription: string; tags: string[] };
   mediaPlan: MediaPlan;
   language: string;
-  source: 'ai' | 'mock';
+  niche: string;
+  source: 'ai' | 'mock' | 'ai_partial';
   provider?: string;
   model?: string;
   rawText?: string;
@@ -118,23 +119,121 @@ export type CreativeBrief = {
 function cleanTitle(raw: string): string {
   return String(raw || '')
     .replace(/\[.*?\]/g, '')
-    .replace(/\b(SERPER\+?CJ|MOCK|CJ)\b/gi, '')
+    .replace(/\b(SERPER\+?CJ|MOCK|CJ|Cross-Border|Dropshipping|Hot-Selling)\b/gi, '')
     .replace(/\s+/g, ' ')
     .trim()
     .slice(0, 120);
 }
 
-export function defaultMediaPlan(productName: string): MediaPlan {
+/** Detecta nicho comercial a partir del título / categoría */
+export function detectNiche(rawTitle: string, category?: string): string {
+  const t = `${rawTitle} ${category || ''}`.toLowerCase();
+  if (/collar|necklace|earring|arete|joya|jewelry|rhinestone|crystal|cristal|clav[ií]cula|pendant/.test(t))
+    return 'joyeria';
+  if (/organiza|cocina|kitchen|storage|cable|escritorio|hogar|home|decor/.test(t)) return 'hogar';
+  if (/beauty|skin|makeup|maquill|cuidado|facial|hair|cabello/.test(t)) return 'belleza';
+  if (/phone|celular|soporte|magnet|led|gadget|usb|cargador|tech/.test(t)) return 'tech';
+  if (/fitness|deporte|botella|gym|yoga|sport/.test(t)) return 'fitness';
+  if (/kid|niñ|juguete|toy|baby|bebé/.test(t)) return 'kids';
+  if (/moda|fashion|ropa|dress|jacket|shoe|zapat/.test(t)) return 'moda';
+  return (category || 'general').toLowerCase();
+}
+
+const NICHE_VOICE: Record<
+  string,
+  { tone: string; titleHints: string[]; bulletSeeds: string[]; cta: string }
+> = {
+  joyeria: {
+    tone: 'elegante, aspiracional, regalo, brillo, ocasiones',
+    titleHints: ['Eleva tu look', 'Brilla en cada salida', 'Toque de lujo accesible'],
+    bulletSeeds: [
+      'Acabado brillante que resalta con luz natural y artificial',
+      'Ideal para outfits de día o noche',
+      'Pieza versátil: solitario o en capas',
+      'Detalle premium a precio accesible',
+    ],
+    cta: 'Completa tu look hoy',
+  },
+  hogar: {
+    tone: 'practico, orden, alivio diario, espacio',
+    titleHints: ['Orden sin esfuerzo', 'Tu espacio, más liviano', 'Solucion que se nota'],
+    bulletSeeds: [
+      'Ahorra espacio y reduce el desorden en minutos',
+      'Uso diario simple, sin herramientas complicadas',
+      'Diseno que combina con la mayoria de ambientes',
+      'Resultado visible desde el primer dia',
+    ],
+    cta: 'Ordena tu espacio hoy',
+  },
+  belleza: {
+    tone: 'cuidado, ritual, resultado visible, confianza',
+    titleHints: ['Tu ritual diario', 'Piel que se nota', 'Cuidado que enamora'],
+    bulletSeeds: [
+      'Se integra facil a tu rutina de manana o noche',
+      'Textura agradable y aplicacion sencilla',
+      'Pensado para resultados de aspecto natural',
+      'Ideal para llevar en el bolso',
+    ],
+    cta: 'Empieza tu ritual',
+  },
+  tech: {
+    tone: 'utilidad, modernidad, resolucion de friccion',
+    titleHints: ['Mas practico cada dia', 'Listo cuando tu lo estas', 'Gadget que se nota'],
+    bulletSeeds: [
+      'Instalacion o uso en segundos',
+      'Compatible con el uso diario real',
+      'Diseno compacto y resistente',
+      'Resuelve un problema concreto sin complicaciones',
+    ],
+    cta: 'Haz tu dia mas facil',
+  },
+  fitness: {
+    tone: 'energia, constancia, estilo activo',
+    titleHints: ['Entrena con estilo', 'Constancia con gusto', 'Listo para moverte'],
+    bulletSeeds: [
+      'Acompanante ideal en gym, casa o calle',
+      'Comodo para sesiones largas',
+      'Diseno que motiva a no saltarse el dia',
+      'Facil de limpiar y llevar',
+    ],
+    cta: 'Suma a tu rutina',
+  },
+  moda: {
+    tone: 'estilo, tendencia, confianza al vestir',
+    titleHints: ['Define tu estilo', 'Look de impacto', 'Tendencia que se nota'],
+    bulletSeeds: [
+      'Combina con looks casuales y formales',
+      'Corte y detalle pensados para destacar',
+      'Pieza comoda para todo el dia',
+      'Eleva un outfit basico en segundos',
+    ],
+    cta: 'Renueva tu look',
+  },
+  general: {
+    tone: 'beneficio claro, uso real, compra segura',
+    titleHints: ['La eleccion practica', 'Calidad que se siente', 'Para el dia a dia'],
+    bulletSeeds: [
+      'Pensado para uso frecuente',
+      'Buena relacion calidad-precio',
+      'Facil de usar desde el primer momento',
+      'Envio con seguimiento a Colombia',
+    ],
+    cta: 'Llevalo a casa',
+  },
+};
+
+export function defaultMediaPlan(productName: string, niche = 'general'): MediaPlan {
   const n = productName.slice(0, 80);
+  const voice = NICHE_VOICE[niche] || NICHE_VOICE.general;
   return {
     images: [
       {
         role: 'hero_main',
-        prompt: `Foto de producto profesional de ${n}, fondo limpio, iluminacion de estudio, centrado, e-commerce`,
+        prompt: `Foto de producto profesional e-commerce de ${n}, fondo limpio, iluminacion de estudio, centrado, estilo ${niche}`,
       },
       {
         role: 'lifestyle',
-        prompt: `Persona usando ${n} en contexto realista cotidiano, luz natural, estilo UGC premium`,
+        prompt: `Persona usando ${n} en contexto realista, tono ${voice.tone}, luz natural, UGC premium`,
       },
       {
         role: 'detail_closeup',
@@ -146,18 +245,18 @@ export function defaultMediaPlan(productName: string): MediaPlan {
       },
       {
         role: 'infographic',
-        prompt: `Infografia limpia de beneficios de ${n}, iconos simples, texto legible en espanol, fondo blanco`,
+        prompt: `Infografia de beneficios de ${n} (${niche}), iconos simples, texto en espanol, fondo blanco`,
       },
     ],
     videos: [
       {
         role: 'ugc_hook',
-        prompt: `Video corto vertical 9:16 de ${n}, hook en 3s, demostracion rapida, subtitulos ES`,
+        prompt: `Video vertical 9:16 de ${n}, hook 3s, tono ${voice.tone}, subtitulos ES`,
         durationHintSec: 15,
       },
       {
         role: 'descriptive',
-        prompt: `Video descriptivo de ${n}: caracteristicas, uso y CTA final, 9:16, subtitulos ES`,
+        prompt: `Video descriptivo de ${n}: caracteristicas, uso y CTA "${voice.cta}", 9:16, subtitulos ES`,
         durationHintSec: 30,
       },
     ],
@@ -165,47 +264,99 @@ export function defaultMediaPlan(productName: string): MediaPlan {
 }
 
 function mockBrief(input: CreativeBriefInput): CreativeBrief {
-  const base = cleanTitle(input.rawTitle) || 'Producto ECOM';
-  const short = base.length > 60 ? base.slice(0, 57) + '...' : base;
-  const bullets = [
-    'Diseno practico para uso diario',
-    'Materiales seleccionados para durabilidad',
-    'Facil de integrar en tu rutina',
-    `Envio con seguimiento a ${input.countryCode || 'CO'}`,
-  ];
+  const niche = detectNiche(input.rawTitle, input.category);
+  const voice = NICHE_VOICE[niche] || NICHE_VOICE.general;
+  const base = cleanTitle(input.rawTitle) || 'Producto destacado';
+  // Nombre corto legible
+  const productName = base.length > 48 ? base.slice(0, 45).trim() + '…' : base;
+  const hook = voice.titleHints[Math.floor(Math.abs(hash(base)) % voice.titleHints.length)];
+  const title = `${hook}: ${productName}`.slice(0, 100);
+  const description =
+    `${productName} pensado para quien busca ${voice.tone.split(',')[0].trim()}. ` +
+    `${hook}. ` +
+    `Disenado para el dia a dia en Colombia: practico, con buena presencia y listo para regalar o usar. ` +
+    (input.facts ? `Datos de ficha: ${input.facts.slice(0, 120)}. ` : '') +
+    `${voice.cta}. Envio con seguimiento.`;
+
   return {
-    productName: short,
-    title: short,
-    description:
-      `${short} pensado para quienes buscan calidad y practicidad. ` +
-      `Ideal como regalo o uso personal. ` +
-      (input.facts ? `Detalles: ${input.facts.slice(0, 180)}. ` : '') +
-      `Compra segura y envio con seguimiento.`,
-    bullets,
+    productName,
+    title,
+    description,
+    bullets: voice.bulletSeeds.slice(0, 4),
     importantInfo: [
-      'Verificar medidas/colores en la ficha antes de comprar',
-      'Tiempos de envio internacional pueden variar',
-      'No se hacen afirmaciones medicas ni de resultados garantizados',
+      'Revisa medidas, color y material en la ficha antes de comprar',
+      'Tiempos de envio internacional pueden variar segun destinacion',
+      'Sin afirmaciones medicas ni resultados garantizados',
     ],
     seo: {
-      metaTitle: `${short} | Tienda ECOM`,
-      metaDescription: `${short}. Envio a ${input.countryCode || 'CO'}. Compra segura.`,
-      tags: ['ecom', 'dropshipping', (input.category || 'general').toLowerCase()],
+      metaTitle: `${title}`.slice(0, 65),
+      metaDescription: `${description}`.slice(0, 155),
+      tags: ['ecom', niche, 'colombia', ...(input.category ? [input.category.toLowerCase()] : [])],
     },
-    mediaPlan: defaultMediaPlan(short),
+    mediaPlan: defaultMediaPlan(productName, niche),
     language: input.language || 'es-CO',
+    niche,
     source: 'mock',
   };
 }
 
-function tryParseJsonBrief(text: string): any | null {
-  const m = text.match(/\{[\s\S]*\}/);
+function hash(s: string): number {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
+  return h;
+}
+
+function extractField(text: string, key: string): string | null {
+  const re = new RegExp(`"${key}"\\s*:\\s*"((?:\\.|[^"\\])*)"`, 'i');
+  const m = text.match(re);
   if (!m) return null;
   try {
-    return JSON.parse(m[0]);
+    return JSON.parse(`"${m[1]}"`);
   } catch {
-    return null;
+    return m[1];
   }
+}
+
+function extractArray(text: string, key: string): string[] | null {
+  const re = new RegExp(`"${key}"\\s*:\\s*\\[([\\s\\S]*?)\\]`, 'i');
+  const m = text.match(re);
+  if (!m) return null;
+  const items = [...m[1].matchAll(/"((?:\\.|[^"\\])*)"/g)].map((x) => {
+    try {
+      return JSON.parse(`"${x[1]}"`);
+    } catch {
+      return x[1];
+    }
+  });
+  return items.length ? items : null;
+}
+
+function tryParseJsonBrief(text: string): any | null {
+  const m = text.match(/\{[\s\S]*\}/);
+  if (m) {
+    try {
+      return JSON.parse(m[0]);
+    } catch {
+      /* partial */
+    }
+  }
+  // Recuperacion parcial si el JSON viene truncado
+  const title = extractField(text, 'title');
+  const productName = extractField(text, 'productName');
+  const description = extractField(text, 'description');
+  if (!title && !productName && !description) return null;
+  return {
+    productName: productName || title,
+    title: title || productName,
+    description,
+    bullets: extractArray(text, 'bullets'),
+    importantInfo: extractArray(text, 'importantInfo'),
+    seo: {
+      metaTitle: extractField(text, 'metaTitle'),
+      metaDescription: extractField(text, 'metaDescription'),
+    },
+    _partial: true,
+  };
 }
 
 export async function generateCreativeBrief(input: CreativeBriefInput): Promise<{
@@ -213,43 +364,52 @@ export async function generateCreativeBrief(input: CreativeBriefInput): Promise<
   brief: CreativeBrief;
   ai?: AiResponse;
 }> {
+  const niche = detectNiche(input.rawTitle, input.category);
+  const voice = NICHE_VOICE[niche] || NICHE_VOICE.general;
+
   if (input.forceMock) {
     return { ok: true, brief: mockBrief(input) };
   }
 
   const lang = input.language || 'es-CO';
   const system =
-    'Eres director creativo de e-commerce para Colombia (es-CO). ' +
-    'Responde SOLO con JSON valido, sin markdown. Campos: ' +
-    'productName, title, description, bullets (array 4), importantInfo (array 3), ' +
-    'seo: {metaTitle, metaDescription, tags}. Sin promesas medicas.';
+    `Eres copywriter senior de e-commerce para Colombia (${lang}). ` +
+    `Nicho detectado: ${niche}. Tono: ${voice.tone}. ` +
+    `Escribe titulos y descripciones LLAMATIVOS, orientados a conversion, sin sonar genericos. ` +
+    `Evita relleno tipo "calidad y practicidad". Usa beneficios concretos del producto. ` +
+    `Prohibido: promesas medicas, garantias absolutas, ingles tecnico de proveedor, palabras Cross-Border/Dropshipping. ` +
+    `Responde SOLO JSON valido (sin markdown). Esquema exacto:\n` +
+    `{"productName":"nombre corto comercial max 50","title":"titulo venta max 90 con gancho","description":"120-220 palabras persuasivas en espanol","bullets":["4 bullets de beneficio"],"importantInfo":["3 avisos honestos"],"seo":{"metaTitle":"max 60","metaDescription":"max 150","tags":["tag1","tag2"]}}`;
 
   const user =
-    `Producto crudo: ${input.rawTitle}\n` +
-    `Categoria: ${input.category || 'general'}\n` +
-    `Pais: ${input.countryCode || 'CO'}\n` +
-    `Precio: ${input.salePrice != null ? input.salePrice + ' ' + (input.currency || 'COP') : 'n/a'}\n` +
-    `Hechos: ${input.facts || 'n/a'}\n` +
-    `Idioma: ${lang}`;
+    `Producto crudo del proveedor: ${input.rawTitle}\n` +
+    `Nicho: ${niche}\n` +
+    `Categoria: ${input.category || 'n/a'}\n` +
+    `Pais destino: ${input.countryCode || 'CO'}\n` +
+    `Precio sugerido: ${input.salePrice != null ? input.salePrice + ' ' + (input.currency || 'COP') : 'n/a'}\n` +
+    `Hechos / costos: ${input.facts || 'n/a'}\n` +
+    `Ganchos de referencia del nicho: ${voice.titleHints.join(' | ')}\n` +
+    `CTA natural: ${voice.cta}\n` +
+    `Genera el JSON de venta ahora.`;
 
   const ai = await complete({
     task: 'copy',
-    temperature: 0.5,
-    maxTokens: 900,
+    temperature: 0.7,
+    maxTokens: 1400,
     messages: [
       { role: 'system', content: system },
       { role: 'user', content: user },
     ],
   });
 
+  const fallback = mockBrief(input);
   const parsed = ai.ok ? tryParseJsonBrief(ai.text) : null;
-  if (!parsed || !parsed.title) {
-    const fallback = mockBrief(input);
+
+  if (!parsed || (!parsed.title && !parsed.productName)) {
     return {
       ok: true,
       brief: {
         ...fallback,
-        source: ai.mock ? 'mock' : 'mock',
         provider: ai.provider,
         model: ai.model,
         rawText: ai.text,
@@ -258,31 +418,35 @@ export async function generateCreativeBrief(input: CreativeBriefInput): Promise<
     };
   }
 
-  const productName = String(parsed.productName || parsed.title || cleanTitle(input.rawTitle)).slice(0, 80);
-  const title = String(parsed.title || productName).slice(0, 120);
-  const description = String(parsed.description || '').slice(0, 2000);
-  const bullets = Array.isArray(parsed.bullets)
+  const productName = String(parsed.productName || parsed.title || fallback.productName).slice(0, 60);
+  const title = String(parsed.title || productName).slice(0, 100);
+  const description = String(parsed.description || fallback.description).slice(0, 2500);
+  const bullets = Array.isArray(parsed.bullets) && parsed.bullets.length >= 3
     ? parsed.bullets.map(String).slice(0, 6)
-    : mockBrief(input).bullets;
-  const importantInfo = Array.isArray(parsed.importantInfo)
-    ? parsed.importantInfo.map(String).slice(0, 5)
-    : mockBrief(input).importantInfo;
+    : fallback.bullets;
+  const importantInfo =
+    Array.isArray(parsed.importantInfo) && parsed.importantInfo.length >= 2
+      ? parsed.importantInfo.map(String).slice(0, 5)
+      : fallback.importantInfo;
   const seo = parsed.seo || {};
 
   const brief: CreativeBrief = {
     productName,
     title,
-    description: description || mockBrief(input).description,
+    description,
     bullets,
     importantInfo,
     seo: {
-      metaTitle: String(seo.metaTitle || `${title} | ECOM`).slice(0, 70),
-      metaDescription: String(seo.metaDescription || description.slice(0, 155)).slice(0, 160),
-      tags: Array.isArray(seo.tags) ? seo.tags.map(String).slice(0, 10) : ['ecom'],
+      metaTitle: String(seo.metaTitle || title).slice(0, 65),
+      metaDescription: String(seo.metaDescription || description).slice(0, 155),
+      tags: Array.isArray(seo.tags)
+        ? seo.tags.map(String).slice(0, 10)
+        : ['ecom', niche, 'colombia'],
     },
-    mediaPlan: defaultMediaPlan(productName),
+    mediaPlan: defaultMediaPlan(productName, niche),
     language: lang,
-    source: ai.mock ? 'mock' : 'ai',
+    niche,
+    source: parsed._partial ? 'ai_partial' : ai.mock ? 'mock' : 'ai',
     provider: ai.provider,
     model: ai.model,
     rawText: ai.text,
@@ -301,11 +465,20 @@ export function validateBrief(brief: CreativeBrief): {
   if (!brief.bullets || brief.bullets.length < 3) issues.push('bullets_lt_3');
   if (!brief.mediaPlan?.images || brief.mediaPlan.images.length < 5) issues.push('images_plan_lt_5');
   if (!brief.mediaPlan?.videos || brief.mediaPlan.videos.length < 2) issues.push('videos_plan_lt_2');
-  return { ok: issues.length === 0, issues };
+  // Copy generico pobre
+  if (/calidad y practicidad/i.test(brief.description || '')) issues.push('generic_copy');
+  return { ok: issues.filter((i) => i !== 'generic_copy').length === 0, issues };
 }
 
 export const CONTENT_META = {
   block: 61,
-  features: ['landing_html', 'creative_brief', 'media_plan_5img_2vid', 'seo_basic'],
-  note: 'Block 61: brief creativo. Imagenes/videos reales = bloques 62-63.',
+  features: [
+    'landing_html',
+    'creative_brief',
+    'niche_detection',
+    'sales_copy',
+    'media_plan_5img_2vid',
+    'seo_basic',
+  ],
+  note: 'Copy por nicho (joyeria, hogar, tech...). Imagenes/videos = bloques 62-63.',
 };
