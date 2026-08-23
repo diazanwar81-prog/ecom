@@ -62,6 +62,11 @@ function envBool(name: string): boolean {
   return v === 'true' || v === '1' || v === 'yes';
 }
 
+function envInt(name: string, fallback: number): number {
+  const n = parseInt(env(name), 10);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
 function runtimeMode(): RuntimeMode {
   const m = env('ECOM_MODE', 'MOCK').toUpperCase();
   if (m === 'SANDBOX' || m === 'REAL') return m;
@@ -81,14 +86,12 @@ function hfModel() {
   return env('HF_MODEL', 'mistralai/Mistral-7B-Instruct-v0.3') || 'mistralai/Mistral-7B-Instruct-v0.3';
 }
 function ollamaBaseUrl() {
-  // From api container: host.docker.internal reaches Mac host Ollama
   return env('OLLAMA_BASE_URL', 'http://host.docker.internal:11434').replace(/\/$/, '');
 }
 function ollamaModel() {
   return env('OLLAMA_MODEL', 'llama3.2') || 'llama3.2';
 }
 function ollamaEnabled() {
-  // On by default if URL is set; disable with OLLAMA_ENABLED=false
   const v = env('OLLAMA_ENABLED', 'true').toLowerCase();
   return v !== 'false' && v !== '0' && v !== 'no';
 }
@@ -216,6 +219,12 @@ async function callOllama(req: AiRequest): Promise<AiResponse> {
     };
   }
 
+  // Cap tokens to protect CPU/RAM on modest Macs
+  const maxPredict = Math.min(req.maxTokens ?? 512, envInt('OLLAMA_NUM_PREDICT', 512));
+  const numCtx = envInt('OLLAMA_NUM_CTX', 2048);
+  const numThread = envInt('OLLAMA_NUM_THREAD', 2);
+  const keepAlive = env('OLLAMA_KEEP_ALIVE', '10m') || '10m';
+
   const messages = req.messages.map((m) => ({
     role: m.role === 'assistant' ? 'assistant' : m.role === 'system' ? 'system' : 'user',
     content: m.content,
@@ -229,9 +238,12 @@ async function callOllama(req: AiRequest): Promise<AiResponse> {
         model,
         messages,
         stream: false,
+        keep_alive: keepAlive,
         options: {
-          temperature: req.temperature ?? 0.5,
-          num_predict: req.maxTokens ?? 1024,
+          temperature: req.temperature ?? 0.4,
+          num_predict: maxPredict,
+          num_ctx: numCtx,
+          num_thread: numThread,
         },
       }),
     });
@@ -420,7 +432,7 @@ async function callHuggingFace(req: AiRequest): Promise<AiResponse> {
       body: JSON.stringify({
         model,
         messages: chatMessages,
-        max_tokens: req.maxTokens ?? 512,
+        max_tokens: Math.min(req.maxTokens ?? 512, 512),
         temperature: req.temperature ?? 0.4,
       }),
     });
@@ -525,16 +537,17 @@ export async function generateProductCopy(input: {
 }): Promise<AiResponse> {
   return complete({
     task: 'product_description',
+    maxTokens: 400,
+    temperature: 0.4,
     messages: [
       {
         role: 'system',
         content:
-          'Eres copywriter de e-commerce para ECOM. Solo hechos verificables. Sin promesas médicas. Idioma: ' +
-          (input.language ?? 'es-CO'),
+          'Copywriter e-commerce Colombia. Solo español. Hechos verificables. Sin promesas médicas. Respuesta corta.',
       },
       {
         role: 'user',
-        content: `Producto: ${input.title}\nHechos: ${input.facts}\nGenera título corto y descripción comercial.`,
+        content: `Producto: ${input.title}\nHechos: ${input.facts}\nTítulo corto + descripción comercial (máx 120 palabras).`,
       },
     ],
   });
