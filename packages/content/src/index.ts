@@ -231,7 +231,6 @@ const NICHE_VOICE: Record<
   },
 };
 
-/** Palabras EN típicas de ficha de proveedor / copy mezclado */
 const EN_LEAK =
   /\b(necklace|collarbone|earring|earrings|jewelry|jewellery|fashion|luxury|premium|style|elegant|outfit|cross-border|dropshipping|hot-selling|chain necklace|rhinestone|pendant|bracelet|ring set|high-end|accessories|lightweight|versatile)\b/i;
 
@@ -276,7 +275,6 @@ function isWeakProductName(name: string): boolean {
   if (!n || n.length < 4) return true;
   if (/^(luxe|premium|style|elegant|luxury|producto|product)$/i.test(n)) return true;
   if (hasEnglishLeak(n)) return true;
-  // Mostly ASCII English words, few Spanish accents / structure
   const words = n.split(/\s+/);
   const enHits = words.filter((w) =>
     /^(the|and|for|with|set|chain|neck|bone|light|luxury|style)$/i.test(w),
@@ -284,19 +282,24 @@ function isWeakProductName(name: string): boolean {
   return enHits >= 2;
 }
 
-function safeImportantInfo(items: string[]): string[] {
-  const banned = /30\s*d[ií]as|garantiz|100\s*%|resultados? garant/i;
-  const cleaned = items.map(String).filter((x) => x && !banned.test(x)).slice(0, 3);
-  const defaults = [
-    'Revisa medidas, color y material en la ficha antes de comprar',
-    'Los tiempos de envío internacional pueden variar',
-    'Sin afirmaciones médicas ni resultados garantizados',
-  ];
-  while (cleaned.length < 3) cleaned.push(defaults[cleaned.length]);
-  return cleaned;
+/** Avisos legales/honestos fijos — nunca precio, stock ni margen del modelo */
+const HONEST_INFO = [
+  'Revisa medidas, color y material en la ficha antes de comprar',
+  'Los tiempos de envío internacional pueden variar según el destino',
+  'Sin afirmaciones médicas ni resultados garantizados',
+];
+
+function isBadImportantLine(s: string): boolean {
+  return /(\$|COP|USD|precio|stock|unidades|margen|%|garantiz|30\s*d[ií]as|devoluci[oó]n sin costo|impuestos ni tasas)/i.test(
+    s || '',
+  );
 }
 
-/** Normaliza brief AI: nombres ES, sin fugas EN, avisos honestos */
+function safeImportantInfo(_items?: string[]): string[] {
+  // Siempre plantilla honesta: el modelo suele inventar precio/stock/margen/políticas
+  return [...HONEST_INFO];
+}
+
 export function polishBriefEs(
   brief: CreativeBrief,
   fallbackName: string,
@@ -335,7 +338,7 @@ export function polishBriefEs(
     bullets.push(voice.bulletSeeds[bullets.length] || 'Envío con seguimiento a Colombia');
   }
 
-  const importantInfo = safeImportantInfo(brief.importantInfo || []);
+  const importantInfo = safeImportantInfo(brief.importantInfo);
 
   let metaTitle = scrubEnglish(brief.seo?.metaTitle || title).slice(0, 60);
   let metaDescription = scrubEnglish(brief.seo?.metaDescription || description).slice(0, 150);
@@ -411,7 +414,6 @@ function mockBrief(input: CreativeBriefInput): CreativeBrief {
   const niche = detectNiche(input.rawTitle, input.category);
   const voice = NICHE_VOICE[niche] || NICHE_VOICE.general;
   const base = cleanTitle(input.rawTitle) || voice.nameExamples[0];
-  // Prefer Spanish example if cleaned title still looks English
   const productName = isWeakProductName(base)
     ? voice.nameExamples[0]
     : base.length > 42
@@ -429,11 +431,7 @@ function mockBrief(input: CreativeBriefInput): CreativeBrief {
     title,
     description,
     bullets: voice.bulletSeeds.slice(0, 4),
-    importantInfo: [
-      'Revisa medidas, color y material en la ficha antes de comprar',
-      'Los tiempos de envío internacional pueden variar',
-      'Sin afirmaciones médicas ni resultados garantizados',
-    ],
+    importantInfo: [...HONEST_INFO],
     seo: {
       metaTitle: title.slice(0, 60),
       metaDescription: description.slice(0, 150),
@@ -557,7 +555,7 @@ function buildSystemPrompt(niche: string, voice: (typeof NICHE_VOICE)[string]): 
       voice.titleHints.join(' | ') + '.',
     '4) description: 90-140 palabras. Habla al comprador (tu/te). Beneficio, uso, ocasion, CTA.',
     '5) bullets: exactamente 4 beneficios observables.',
-    '6) importantInfo: 3 avisos honestos (medidas, envio variable, sin promesas medicas). NO inventes "30 dias de devolucion".',
+    '6) importantInfo: deja 3 strings cortos; el sistema los normalizara. NO pongas precio, stock, margen ni politicas de devolucion inventadas.',
     '7) seo solo en espanol.',
     '8) Prohibido: porcentajes inventados, garantizado, jerga de proveedor.',
     '',
@@ -637,7 +635,7 @@ export async function generateCreativeBrief(input: CreativeBriefInput): Promise<
     };
   }
 
-  let productName = String(parsed.productName || parsed.title || fallback.productName).slice(0, 50);
+  const productName = String(parsed.productName || parsed.title || fallback.productName).slice(0, 50);
   const title = String(parsed.title || productName).slice(0, 90);
   const description = String(parsed.description || fallback.description).slice(0, 1200);
   const bullets =
@@ -690,9 +688,11 @@ export function validateBrief(brief: CreativeBrief): {
   if (isWeakProductName(brief.productName || '')) issues.push('generic_product_name');
   if (hasEnglishLeak(brief.description || '') || hasEnglishLeak(brief.productName || ''))
     issues.push('english_leak');
+  if (brief.importantInfo?.some(isBadImportantLine)) issues.push('bad_important_info');
   if (/calidad y practicidad/i.test(brief.description || '')) issues.push('generic_copy');
   const hard = issues.filter(
-    (i) => !['generic_copy', 'english_leak', 'generic_product_name'].includes(i),
+    (i) =>
+      !['generic_copy', 'english_leak', 'generic_product_name', 'bad_important_info'].includes(i),
   );
   return { ok: hard.length === 0, issues };
 }
@@ -708,6 +708,7 @@ export const CONTENT_META = {
     'seo_basic',
     'quality_prompt_v2',
     'polish_es_postprocess',
+    'honest_important_info',
   ],
-  note: 'Post-proceso ES: limpia necklace/collarbone, nombres debiles y avisos inventados.',
+  note: 'importantInfo siempre plantilla honesta (sin precio/stock/margen del modelo).',
 };
