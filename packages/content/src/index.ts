@@ -231,6 +231,141 @@ const NICHE_VOICE: Record<
   },
 };
 
+/** Palabras EN típicas de ficha de proveedor / copy mezclado */
+const EN_LEAK =
+  /\b(necklace|collarbone|earring|earrings|jewelry|jewellery|fashion|luxury|premium|style|elegant|outfit|cross-border|dropshipping|hot-selling|chain necklace|rhinestone|pendant|bracelet|ring set|high-end|accessories|lightweight|versatile)\b/i;
+
+const EN_REPLACEMENTS: Array<[RegExp, string]> = [
+  [/collarbone\s*chain\s*necklace/gi, 'collar de clavícula'],
+  [/chain\s*necklace/gi, 'collar de cadena'],
+  [/collarbone/gi, 'clavícula'],
+  [/necklace/gi, 'collar'],
+  [/earrings?/gi, 'aretes'],
+  [/jewelry|jewellery/gi, 'joyería'],
+  [/rhinestone/gi, 'brillos'],
+  [/pendant/gi, 'dije'],
+  [/bracelet/gi, 'pulsera'],
+  [/outfit/gi, 'look'],
+  [/fashion/gi, 'moda'],
+  [/luxury/gi, 'lujo'],
+  [/premium/gi, 'de calidad'],
+  [/elegant/gi, 'elegante'],
+  [/lightweight/gi, 'liviano'],
+  [/versatile/gi, 'versátil'],
+  [/accessories/gi, 'accesorios'],
+  [/high-end/gi, 'de alta gama'],
+  [/cross-border/gi, ''],
+  [/dropshipping/gi, ''],
+  [/hot-selling/gi, ''],
+];
+
+function hasEnglishLeak(s: string): boolean {
+  return EN_LEAK.test(s || '');
+}
+
+function scrubEnglish(text: string): string {
+  let t = String(text || '');
+  for (const [re, rep] of EN_REPLACEMENTS) {
+    t = t.replace(re, rep);
+  }
+  return t.replace(/\s{2,}/g, ' ').trim();
+}
+
+function isWeakProductName(name: string): boolean {
+  const n = (name || '').trim();
+  if (!n || n.length < 4) return true;
+  if (/^(luxe|premium|style|elegant|luxury|producto|product)$/i.test(n)) return true;
+  if (hasEnglishLeak(n)) return true;
+  // Mostly ASCII English words, few Spanish accents / structure
+  const words = n.split(/\s+/);
+  const enHits = words.filter((w) =>
+    /^(the|and|for|with|set|chain|neck|bone|light|luxury|style)$/i.test(w),
+  ).length;
+  return enHits >= 2;
+}
+
+function safeImportantInfo(items: string[]): string[] {
+  const banned = /30\s*d[ií]as|garantiz|100\s*%|resultados? garant/i;
+  const cleaned = items.map(String).filter((x) => x && !banned.test(x)).slice(0, 3);
+  const defaults = [
+    'Revisa medidas, color y material en la ficha antes de comprar',
+    'Los tiempos de envío internacional pueden variar',
+    'Sin afirmaciones médicas ni resultados garantizados',
+  ];
+  while (cleaned.length < 3) cleaned.push(defaults[cleaned.length]);
+  return cleaned;
+}
+
+/** Normaliza brief AI: nombres ES, sin fugas EN, avisos honestos */
+export function polishBriefEs(
+  brief: CreativeBrief,
+  fallbackName: string,
+  voice: (typeof NICHE_VOICE)[string],
+): CreativeBrief {
+  let productName = brief.productName;
+  if (isWeakProductName(productName)) {
+    productName = fallbackName || voice.nameExamples[0];
+  } else {
+    productName = scrubEnglish(productName).slice(0, 50);
+    if (isWeakProductName(productName)) {
+      productName = fallbackName || voice.nameExamples[0];
+    }
+  }
+
+  let title = scrubEnglish(brief.title || '');
+  if (!title || hasEnglishLeak(title) || title.length < 8) {
+    const hook = voice.titleHints[0];
+    title = `${hook}: ${productName}`.slice(0, 90);
+  } else {
+    title = title.slice(0, 90);
+  }
+
+  let description = scrubEnglish(brief.description || '');
+  if (!description || description.length < 40) {
+    description =
+      `${productName} con estilo ${voice.tone.split(',')[0].trim()}. ` +
+      `${voice.titleHints[0]}. Ideal para uso diario en Colombia. ${voice.cta}. Envío con seguimiento.`;
+  }
+
+  const bullets = (brief.bullets || [])
+    .map((b) => scrubEnglish(String(b)))
+    .filter(Boolean)
+    .slice(0, 4);
+  while (bullets.length < 4) {
+    bullets.push(voice.bulletSeeds[bullets.length] || 'Envío con seguimiento a Colombia');
+  }
+
+  const importantInfo = safeImportantInfo(brief.importantInfo || []);
+
+  let metaTitle = scrubEnglish(brief.seo?.metaTitle || title).slice(0, 60);
+  let metaDescription = scrubEnglish(brief.seo?.metaDescription || description).slice(0, 150);
+  if (hasEnglishLeak(metaTitle)) metaTitle = title.slice(0, 60);
+  if (hasEnglishLeak(metaDescription)) metaDescription = description.slice(0, 150);
+
+  const tags = (brief.seo?.tags || [])
+    .map((t) => scrubEnglish(String(t)).toLowerCase())
+    .filter((t) => t && !hasEnglishLeak(t) && t !== 'collarbone')
+    .slice(0, 6);
+  if (tags.length < 2) {
+    tags.push(brief.niche || 'ecom', 'colombia');
+  }
+
+  return {
+    ...brief,
+    productName,
+    title,
+    description,
+    bullets,
+    importantInfo,
+    seo: {
+      metaTitle,
+      metaDescription,
+      tags,
+    },
+    mediaPlan: defaultMediaPlan(productName, brief.niche),
+  };
+}
+
 export function defaultMediaPlan(productName: string, niche = 'general'): MediaPlan {
   const n = productName.slice(0, 60);
   const voice = NICHE_VOICE[niche] || NICHE_VOICE.general;
@@ -276,16 +411,18 @@ function mockBrief(input: CreativeBriefInput): CreativeBrief {
   const niche = detectNiche(input.rawTitle, input.category);
   const voice = NICHE_VOICE[niche] || NICHE_VOICE.general;
   const base = cleanTitle(input.rawTitle) || voice.nameExamples[0];
-  const productName =
-    base.length > 42
+  // Prefer Spanish example if cleaned title still looks English
+  const productName = isWeakProductName(base)
+    ? voice.nameExamples[0]
+    : base.length > 42
       ? base.slice(0, 39).trim() + '…'
-      : base || voice.nameExamples[0];
+      : base;
   const hook = voice.titleHints[Math.floor(Math.abs(hash(base)) % voice.titleHints.length)];
   const title = `${hook}: ${productName}`.slice(0, 90);
   const description =
     `${productName} para quien busca ${voice.tone.split(',')[0].trim()}. ` +
     `${hook}. Ideal para uso diario en Colombia, con presencia cuidada y listo para regalar. ` +
-    `${voice.cta}. Envio con seguimiento.`;
+    `${voice.cta}. Envío con seguimiento.`;
 
   return {
     productName,
@@ -294,8 +431,8 @@ function mockBrief(input: CreativeBriefInput): CreativeBrief {
     bullets: voice.bulletSeeds.slice(0, 4),
     importantInfo: [
       'Revisa medidas, color y material en la ficha antes de comprar',
-      'Los tiempos de envio internacional pueden variar',
-      'Sin afirmaciones medicas ni resultados garantizados',
+      'Los tiempos de envío internacional pueden variar',
+      'Sin afirmaciones médicas ni resultados garantizados',
     ],
     seo: {
       metaTitle: title.slice(0, 60),
@@ -405,7 +542,6 @@ function tryParseJsonBrief(text: string): any | null {
   }
 }
 
-/** Prompt de calidad: reglas claras de venta, sin acortar el mensaje comercial. */
 function buildSystemPrompt(niche: string, voice: (typeof NICHE_VOICE)[string]): string {
   return [
     'Eres copywriter senior de e-commerce para Colombia (es-CO).',
@@ -414,39 +550,43 @@ function buildSystemPrompt(niche: string, voice: (typeof NICHE_VOICE)[string]): 
     'OBJETIVO: textos que venden. Claros, concretos, con emocion controlada.',
     '',
     'REGLAS OBLIGATORIAS:',
-    '1) 100% espanol latino. Cero ingles (nada de necklace, fashion, luxury, cross-border).',
-    '2) productName: nombre comercial CONCRETO (tipo de producto + atributo). Prohibido nombres vacios como "Luxe", "Premium", "Style".',
-    `   Ejemplos validos para este nicho: ${voice.nameExamples.join('; ')}.`,
-    '3) title: gancho de venta + beneficio. Max 80 caracteres. Puede usar uno de: ' +
+    '1) 100% espanol latino. Cero ingles (nada de necklace, fashion, luxury, collarbone, outfit).',
+    '2) productName: nombre comercial CONCRETO en espanol (tipo + atributo). Prohibido Luxe, Premium, Style y nombres en ingles.',
+    `   Ejemplos validos: ${voice.nameExamples.join('; ')}.`,
+    '3) title: gancho de venta + beneficio. Max 80 caracteres. Opciones: ' +
       voice.titleHints.join(' | ') + '.',
-    '4) description: 90-140 palabras. Habla al comprador (tu/te). Beneficio, uso, ocasion, cierre con CTA natural.',
-    '5) bullets: exactamente 4, cada uno un beneficio observable (no adjetivos vacios).',
-    '6) importantInfo: 3 avisos honestos (medidas, envio, sin promesas medicas).',
-    '7) seo.metaTitle max 55; seo.metaDescription max 140; 2-4 tags en espanol.',
-    '8) Prohibido: porcentajes inventados, "garantizado", promesas medicas, jerga de proveedor chino.',
+    '4) description: 90-140 palabras. Habla al comprador (tu/te). Beneficio, uso, ocasion, CTA.',
+    '5) bullets: exactamente 4 beneficios observables.',
+    '6) importantInfo: 3 avisos honestos (medidas, envio variable, sin promesas medicas). NO inventes "30 dias de devolucion".',
+    '7) seo solo en espanol.',
+    '8) Prohibido: porcentajes inventados, garantizado, jerga de proveedor.',
     '',
-    'Responde SOLO un JSON valido, sin markdown ni texto fuera del JSON.',
-    'Schema exacto:',
+    'Responde SOLO JSON valido, sin markdown.',
     '{"productName":"...","title":"...","description":"...","bullets":["...","...","...","..."],"importantInfo":["...","...","..."],"seo":{"metaTitle":"...","metaDescription":"...","tags":["...","..."]}}',
   ].join('\n');
 }
 
-function buildUserPrompt(input: CreativeBriefInput, cleaned: string, niche: string, voice: (typeof NICHE_VOICE)[string]): string {
+function buildUserPrompt(
+  input: CreativeBriefInput,
+  cleaned: string,
+  niche: string,
+  voice: (typeof NICHE_VOICE)[string],
+): string {
   const lines = [
     'Genera el JSON de venta para este producto:',
-    `Titulo crudo del proveedor (solo referencia): ${input.rawTitle}`,
-    `Titulo limpio sugerido: ${cleaned || '(derivar del crudo)'}`,
-    `Nicho detectado: ${niche}`,
+    `Titulo crudo del proveedor (solo referencia, NO copiar en ingles): ${input.rawTitle}`,
+    `Titulo limpio sugerido: ${cleaned || '(crear nombre en espanol)'}`,
+    `Nicho: ${niche}`,
     `Pais: ${input.countryCode || 'CO'}`,
   ];
   if (input.salePrice != null) {
     lines.push(`Precio sugerido: ${input.salePrice} ${input.currency || 'COP'}`);
   }
   if (input.facts) {
-    lines.push(`Datos de ficha (no inventar fuera de esto): ${input.facts.slice(0, 200)}`);
+    lines.push(`Datos de ficha: ${input.facts.slice(0, 200)}`);
   }
-  lines.push(`CTA de referencia: ${voice.cta}`);
-  lines.push('Escribe como si el cliente fuera a leerlo en Shopify en Colombia.');
+  lines.push(`CTA: ${voice.cta}`);
+  lines.push('Todo el JSON debe estar en espanol de Colombia.');
   return lines.join('\n');
 }
 
@@ -464,6 +604,7 @@ export async function generateCreativeBrief(input: CreativeBriefInput): Promise<
 
   const lang = input.language || 'es-CO';
   const cleaned = cleanTitle(input.rawTitle);
+  const fallbackName = isWeakProductName(cleaned) ? voice.nameExamples[0] : cleaned.slice(0, 45);
 
   const ai = await complete({
     task: 'copy',
@@ -497,26 +638,19 @@ export async function generateCreativeBrief(input: CreativeBriefInput): Promise<
   }
 
   let productName = String(parsed.productName || parsed.title || fallback.productName).slice(0, 50);
-  // Evitar nombres vacios tipo "Luxe"
-  if (/^(luxe|premium|style|elegant|luxury|producto)$/i.test(productName.trim())) {
-    productName = fallback.productName;
-  }
-
   const title = String(parsed.title || productName).slice(0, 90);
   const description = String(parsed.description || fallback.description).slice(0, 1200);
   const bullets =
     Array.isArray(parsed.bullets) && parsed.bullets.length >= 3
       ? parsed.bullets.map(String).slice(0, 4)
       : fallback.bullets;
-  while (bullets.length < 4) bullets.push(voice.bulletSeeds[bullets.length] || 'Envio con seguimiento');
-
   const importantInfo =
     Array.isArray(parsed.importantInfo) && parsed.importantInfo.length >= 2
       ? parsed.importantInfo.map(String).slice(0, 3)
       : fallback.importantInfo;
   const seo = parsed.seo || {};
 
-  const brief: CreativeBrief = {
+  const rawBrief: CreativeBrief = {
     productName,
     title,
     description,
@@ -538,6 +672,8 @@ export async function generateCreativeBrief(input: CreativeBriefInput): Promise<
     rawText: ai.text,
   };
 
+  const brief = polishBriefEs(rawBrief, fallbackName, voice);
+
   return { ok: true, brief, ai };
 }
 
@@ -551,8 +687,9 @@ export function validateBrief(brief: CreativeBrief): {
   if (!brief.bullets || brief.bullets.length < 3) issues.push('bullets_lt_3');
   if (!brief.mediaPlan?.images || brief.mediaPlan.images.length < 5) issues.push('images_plan_lt_5');
   if (!brief.mediaPlan?.videos || brief.mediaPlan.videos.length < 2) issues.push('videos_plan_lt_2');
-  if (/^(luxe|premium|style)$/i.test((brief.productName || '').trim())) issues.push('generic_product_name');
-  if (/necklace|fashion|cross-border|dropshipping/i.test(brief.description || '')) issues.push('english_leak');
+  if (isWeakProductName(brief.productName || '')) issues.push('generic_product_name');
+  if (hasEnglishLeak(brief.description || '') || hasEnglishLeak(brief.productName || ''))
+    issues.push('english_leak');
   if (/calidad y practicidad/i.test(brief.description || '')) issues.push('generic_copy');
   const hard = issues.filter(
     (i) => !['generic_copy', 'english_leak', 'generic_product_name'].includes(i),
@@ -570,6 +707,7 @@ export const CONTENT_META = {
     'media_plan_5img_2vid',
     'seo_basic',
     'quality_prompt_v2',
+    'polish_es_postprocess',
   ],
-  note: 'Prompt de venta mejorado: nombre concreto, espanol total, 4 bullets, sin stats inventados.',
+  note: 'Post-proceso ES: limpia necklace/collarbone, nombres debiles y avisos inventados.',
 };
