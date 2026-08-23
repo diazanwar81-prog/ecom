@@ -267,7 +267,6 @@ function mockBrief(input: CreativeBriefInput): CreativeBrief {
   const niche = detectNiche(input.rawTitle, input.category);
   const voice = NICHE_VOICE[niche] || NICHE_VOICE.general;
   const base = cleanTitle(input.rawTitle) || 'Producto destacado';
-  // Nombre corto legible
   const productName = base.length > 48 ? base.slice(0, 45).trim() + '…' : base;
   const hook = voice.titleHints[Math.floor(Math.abs(hash(base)) % voice.titleHints.length)];
   const title = `${hook}: ${productName}`.slice(0, 100);
@@ -306,28 +305,63 @@ function hash(s: string): number {
   return h;
 }
 
+/** Extrae "key": "value" sin regex frágil (soporta JSON truncado). */
 function extractField(text: string, key: string): string | null {
-  const re = new RegExp(`"${key}"\\s*:\\s*"((?:\\.|[^"\\])*)"`, 'i');
-  const m = text.match(re);
-  if (!m) return null;
-  try {
-    return JSON.parse(`"${m[1]}"`);
-  } catch {
-    return m[1];
+  const needle = `"${key}"`;
+  const idx = text.indexOf(needle);
+  if (idx < 0) return null;
+  let i = idx + needle.length;
+  while (i < text.length && (text[i] === ' ' || text[i] === '\t' || text[i] === '\n' || text[i] === '\r')) i++;
+  if (text[i] !== ':') return null;
+  i++;
+  while (i < text.length && (text[i] === ' ' || text[i] === '\t' || text[i] === '\n' || text[i] === '\r')) i++;
+  if (text[i] !== '"') return null;
+  i++;
+  let out = '';
+  while (i < text.length) {
+    const ch = text[i];
+    if (ch === '\\' && i + 1 < text.length) {
+      out += text[i + 1];
+      i += 2;
+      continue;
+    }
+    if (ch === '"') break;
+    out += ch;
+    i++;
   }
+  return out || null;
 }
 
 function extractArray(text: string, key: string): string[] | null {
-  const re = new RegExp(`"${key}"\\s*:\\s*\\[([\\s\\S]*?)\\]`, 'i');
-  const m = text.match(re);
-  if (!m) return null;
-  const items = [...m[1].matchAll(/"((?:\\.|[^"\\])*)"/g)].map((x) => {
-    try {
-      return JSON.parse(`"${x[1]}"`);
-    } catch {
-      return x[1];
+  const needle = `"${key}"`;
+  const idx = text.indexOf(needle);
+  if (idx < 0) return null;
+  let i = idx + needle.length;
+  while (i < text.length && text[i] !== '[') i++;
+  if (text[i] !== '[') return null;
+  i++;
+  const items: string[] = [];
+  while (i < text.length && text[i] !== ']') {
+    while (i < text.length && text[i] !== '"' && text[i] !== ']') i++;
+    if (text[i] === ']') break;
+    i++;
+    let s = '';
+    while (i < text.length) {
+      const ch = text[i];
+      if (ch === '\\' && i + 1 < text.length) {
+        s += text[i + 1];
+        i += 2;
+        continue;
+      }
+      if (ch === '"') {
+        i++;
+        break;
+      }
+      s += ch;
+      i++;
     }
-  });
+    if (s) items.push(s);
+  }
   return items.length ? items : null;
 }
 
@@ -340,23 +374,26 @@ function tryParseJsonBrief(text: string): any | null {
       /* partial */
     }
   }
-  // Recuperacion parcial si el JSON viene truncado
-  const title = extractField(text, 'title');
-  const productName = extractField(text, 'productName');
-  const description = extractField(text, 'description');
-  if (!title && !productName && !description) return null;
-  return {
-    productName: productName || title,
-    title: title || productName,
-    description,
-    bullets: extractArray(text, 'bullets'),
-    importantInfo: extractArray(text, 'importantInfo'),
-    seo: {
-      metaTitle: extractField(text, 'metaTitle'),
-      metaDescription: extractField(text, 'metaDescription'),
-    },
-    _partial: true,
-  };
+  try {
+    const title = extractField(text, 'title');
+    const productName = extractField(text, 'productName');
+    const description = extractField(text, 'description');
+    if (!title && !productName && !description) return null;
+    return {
+      productName: productName || title,
+      title: title || productName,
+      description,
+      bullets: extractArray(text, 'bullets'),
+      importantInfo: extractArray(text, 'importantInfo'),
+      seo: {
+        metaTitle: extractField(text, 'metaTitle'),
+        metaDescription: extractField(text, 'metaDescription'),
+      },
+      _partial: true,
+    };
+  } catch {
+    return null;
+  }
 }
 
 export async function generateCreativeBrief(input: CreativeBriefInput): Promise<{
@@ -403,7 +440,12 @@ export async function generateCreativeBrief(input: CreativeBriefInput): Promise<
   });
 
   const fallback = mockBrief(input);
-  const parsed = ai.ok ? tryParseJsonBrief(ai.text) : null;
+  let parsed: any = null;
+  try {
+    parsed = ai.ok ? tryParseJsonBrief(ai.text) : null;
+  } catch {
+    parsed = null;
+  }
 
   if (!parsed || (!parsed.title && !parsed.productName)) {
     return {
@@ -421,9 +463,10 @@ export async function generateCreativeBrief(input: CreativeBriefInput): Promise<
   const productName = String(parsed.productName || parsed.title || fallback.productName).slice(0, 60);
   const title = String(parsed.title || productName).slice(0, 100);
   const description = String(parsed.description || fallback.description).slice(0, 2500);
-  const bullets = Array.isArray(parsed.bullets) && parsed.bullets.length >= 3
-    ? parsed.bullets.map(String).slice(0, 6)
-    : fallback.bullets;
+  const bullets =
+    Array.isArray(parsed.bullets) && parsed.bullets.length >= 3
+      ? parsed.bullets.map(String).slice(0, 6)
+      : fallback.bullets;
   const importantInfo =
     Array.isArray(parsed.importantInfo) && parsed.importantInfo.length >= 2
       ? parsed.importantInfo.map(String).slice(0, 5)
@@ -465,7 +508,6 @@ export function validateBrief(brief: CreativeBrief): {
   if (!brief.bullets || brief.bullets.length < 3) issues.push('bullets_lt_3');
   if (!brief.mediaPlan?.images || brief.mediaPlan.images.length < 5) issues.push('images_plan_lt_5');
   if (!brief.mediaPlan?.videos || brief.mediaPlan.videos.length < 2) issues.push('videos_plan_lt_2');
-  // Copy generico pobre
   if (/calidad y practicidad/i.test(brief.description || '')) issues.push('generic_copy');
   return { ok: issues.filter((i) => i !== 'generic_copy').length === 0, issues };
 }
