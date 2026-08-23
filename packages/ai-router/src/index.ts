@@ -1,13 +1,13 @@
 /**
  * ECOM AI Router
- * - Providers: Gemini (primary), Hugging Face (fallback), Mock
+ * - Providers: Ollama (local), Gemini, Hugging Face, Mock
  * - Budget: $0 automatic — never triggers paid upgrades
  * - Env read per request (trim + normalize)
  * - Live failures always surface error details (never silent mock)
  */
 
 export type RuntimeMode = 'MOCK' | 'SANDBOX' | 'REAL';
-export type ProviderId = 'mock' | 'gemini' | 'huggingface';
+export type ProviderId = 'mock' | 'ollama' | 'gemini' | 'huggingface';
 
 export interface AiMessage {
   role: 'system' | 'user' | 'assistant';
@@ -74,13 +74,23 @@ function geminiKey() {
 function hfToken() {
   return env('HF_TOKEN') || env('HUGGINGFACE_API_KEY');
 }
-/** Default matches current Gemini stable Flash (2026). Override with GEMINI_MODEL. */
 function geminiModel() {
   return env('GEMINI_MODEL', 'gemini-3.6-flash') || 'gemini-3.6-flash';
 }
-/** Prefer a small free-tier friendly model; override with HF_MODEL. */
 function hfModel() {
-  return env('HF_MODEL', 'HuggingFaceH4/zephyr-7b-beta') || 'HuggingFaceH4/zephyr-7b-beta';
+  return env('HF_MODEL', 'mistralai/Mistral-7B-Instruct-v0.3') || 'mistralai/Mistral-7B-Instruct-v0.3';
+}
+function ollamaBaseUrl() {
+  // From api container: host.docker.internal reaches Mac host Ollama
+  return env('OLLAMA_BASE_URL', 'http://host.docker.internal:11434').replace(/\/$/, '');
+}
+function ollamaModel() {
+  return env('OLLAMA_MODEL', 'llama3.2') || 'llama3.2';
+}
+function ollamaEnabled() {
+  // On by default if URL is set; disable with OLLAMA_ENABLED=false
+  const v = env('OLLAMA_ENABLED', 'true').toLowerCase();
+  return v !== 'false' && v !== '0' && v !== 'no';
 }
 
 function hasKey(k: string) {
@@ -100,6 +110,7 @@ export function getRouterStatus(): RouterStatus {
   const hKey = hfToken();
   const geminiOk = hasKey(gKey) && !isPlaceholder(gKey);
   const hfOk = hasKey(hKey) && !isPlaceholder(hKey);
+  const ollamaOn = ollamaEnabled();
   const liveAllowed = mode !== 'MOCK' || forceLive;
 
   return {
@@ -107,8 +118,17 @@ export function getRouterStatus(): RouterStatus {
     budgetUsdAutomatic: 0,
     allowPaid,
     forceLive,
-    defaultChain: ['gemini', 'huggingface'],
+    defaultChain: ['ollama', 'gemini', 'huggingface'],
     providers: [
+      {
+        id: 'ollama',
+        configured: ollamaOn,
+        enabled: ollamaOn && liveAllowed,
+        model: ollamaModel(),
+        note: ollamaOn
+          ? `Local ${ollamaBaseUrl()} · model=${ollamaModel()} · liveAllowed=${liveAllowed}`
+          : 'OLLAMA_ENABLED=false',
+      },
       {
         id: 'gemini',
         configured: geminiOk,
@@ -174,6 +194,94 @@ function mockComplete(req: AiRequest): AiResponse {
     mock: true,
     latencyMs: 5,
   };
+}
+
+async function callOllama(req: AiRequest): Promise<AiResponse> {
+  const started = Date.now();
+  const mode = runtimeMode();
+  const base = ollamaBaseUrl();
+  const model = ollamaModel();
+
+  if (!ollamaEnabled()) {
+    return {
+      ok: false,
+      text: '',
+      provider: 'ollama',
+      model,
+      mode,
+      mock: false,
+      pending: true,
+      error: 'Ollama deshabilitado (OLLAMA_ENABLED=false)',
+      latencyMs: Date.now() - started,
+    };
+  }
+
+  const messages = req.messages.map((m) => ({
+    role: m.role === 'assistant' ? 'assistant' : m.role === 'system' ? 'system' : 'user',
+    content: m.content,
+  }));
+
+  try {
+    const res = await fetch(`${base}/api/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model,
+        messages,
+        stream: false,
+        options: {
+          temperature: req.temperature ?? 0.5,
+          num_predict: req.maxTokens ?? 1024,
+        },
+      }),
+    });
+
+    const data = (await res.json()) as any;
+
+    if (!res.ok) {
+      const msg = data?.error || `Ollama HTTP ${res.status}`;
+      return {
+        ok: false,
+        text: '',
+        provider: 'ollama',
+        model,
+        mode,
+        mock: false,
+        pending: true,
+        error: String(msg),
+        latencyMs: Date.now() - started,
+      };
+    }
+
+    const text = data?.message?.content ?? '';
+
+    return {
+      ok: Boolean(text),
+      text: text || '',
+      provider: 'ollama',
+      model: data?.model || model,
+      mode,
+      mock: false,
+      error: text ? undefined : 'Respuesta Ollama vacía',
+      usage: {
+        promptTokens: data?.prompt_eval_count,
+        completionTokens: data?.eval_count,
+      },
+      latencyMs: Date.now() - started,
+    };
+  } catch (e: any) {
+    return {
+      ok: false,
+      text: '',
+      provider: 'ollama',
+      model,
+      mode,
+      mock: false,
+      pending: true,
+      error: e?.message || `Error de red Ollama (${base})`,
+      latencyMs: Date.now() - started,
+    };
+  }
 }
 
 async function callGemini(req: AiRequest): Promise<AiResponse> {
@@ -297,7 +405,6 @@ async function callHuggingFace(req: AiRequest): Promise<AiResponse> {
     };
   }
 
-  // Modern HF: OpenAI-compatible chat via router (Inference Providers)
   const chatMessages = req.messages.map((m) => ({
     role: m.role === 'assistant' ? 'assistant' : m.role === 'system' ? 'system' : 'user',
     content: m.content,
@@ -380,6 +487,12 @@ export async function complete(req: AiRequest): Promise<AiResponse> {
   const attempts: string[] = [];
 
   for (const id of chain) {
+    if (id === 'ollama') {
+      const r = await callOllama(req);
+      attempts.push(`ollama:${r.ok ? 'ok' : r.error || 'fail'} (${r.latencyMs}ms)`);
+      if (r.ok) return { ...r, attempts };
+      continue;
+    }
     if (id === 'gemini') {
       const r = await callGemini(req);
       attempts.push(`gemini:${r.ok ? 'ok' : r.error || 'fail'} (${r.latencyMs}ms)`);
