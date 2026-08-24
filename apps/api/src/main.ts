@@ -641,7 +641,7 @@ class HealthController {
       service: 'ecom-api',
       mode: MODE,
       timestamp: new Date().toISOString(),
-      block: 94,
+      block: 95,
       aiRouter: true,
       orchestrator: true,
       agentRuns: true,
@@ -3849,7 +3849,7 @@ class PhaseCController {
         filePath: render.filePath,
         filename: render.fileName,
         mimeType: 'video/mp4',
-        resource: 'FILE',
+        resource: 'VIDEO',
       });
       if (!upload.ok) {
         panelItems.push({
@@ -4011,7 +4011,7 @@ class PhaseCController {
       filePath,
       filename: body?.filename || (render?.fileName as string) || undefined,
       mimeType: 'video/mp4',
-      resource: 'FILE',
+      resource: 'VIDEO',
     });
 
     if (!upload.ok) {
