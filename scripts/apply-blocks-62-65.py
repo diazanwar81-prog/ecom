@@ -24,22 +24,11 @@ if "packages/media/src/index" not in text:
     end = idx + len(anchor)
     text = text[:end] + "\n\n" + IMPORT + text[end:]
 
-# Bump first health block: 61 -> 65
-text, n_health = re.subn(
-    r"(async health\(\)[\s\S]*?block:\s*)61(,")",
-    r"\g<1>65\2",
-    text,
-    count=1,
-)
-if n_health == 0:
-    text, n_health = re.subn(
-        r"block:\s*61,(\s*\n\s*aiRouter:)",
-        r"block: 65,\1",
-        text,
-        count=1,
-    )
+# Health block -> 65 (first occurrence after HealthController)
+if "block: 65" not in text.split("class DiscoveryController")[0]:
+    text = text.replace("block: 61,", "block: 65,", 1)
 
-EXTRA_METHODS = '''
+EXTRA_METHODS = r'''
   @Get('media-meta')
   mediaMeta() {
     return { mode: process.env.ECOM_MODE || 'MOCK', ...MEDIA_META };
@@ -150,7 +139,11 @@ EXTRA_METHODS = '''
     if (p.externalId) {
       const shop = process.env.SHOPIFY_SHOP_DOMAIN || process.env.SHOPIFY_SHOP || '';
       if (shop) {
-        shopifyUrl = `https://${String(shop).replace(/^https?:\\/\\//, '')}/products/${p.externalId}`;
+        shopifyUrl =
+          'https://' +
+          String(shop).replace(/^https?:\/\//, '') +
+          '/products/' +
+          p.externalId;
       }
     }
     const pack = buildLandingPack({
@@ -200,7 +193,7 @@ EXTRA_METHODS = '''
       mode: process.env.ECOM_MODE || 'MOCK',
       shopifyLive: String(process.env.SHOPIFY_ACCESS_TOKEN || '').length > 5,
       cjLive: String(process.env.CJ_API_KEY || '').length > 5,
-      httpsPublic: /^https:\\/\\//i.test(apiUrl),
+      httpsPublic: /^https:\/\//i.test(apiUrl),
       webhookSecret: String(process.env.SHOPIFY_WEBHOOK_SECRET || '').length > 3,
       publishedWithCj,
       pendingApprovals,
@@ -228,26 +221,15 @@ EXTRA_METHODS = '''
 
 '''
 
-# Fix accidental double-escaped regex in template (shopify URL + https test)
-EXTRA_METHODS = EXTRA_METHODS.replace(
-    "replace(/^https?:\\\\/\\\\//, '')",
-    "replace(/^https?:\\/\\//, '')",
-)
-EXTRA_METHODS = EXTRA_METHODS.replace(
-    "/^https:\\\\/\\\\//i.test(apiUrl)",
-    "/^https:\\/\\//i.test(apiUrl)",
-)
-
 if "@Post('images')" not in text and "Block 62: image assets" not in text:
     marker = "  @Post('landing-preview')"
     if marker not in text:
         raise SystemExit("landing-preview not found in CreativeController")
     text = text.replace(marker, EXTRA_METHODS + marker, 1)
 
-# Bootstrap log
 text = re.sub(
-    r"ECOM API block-\d+[^"]*",
-    "ECOM API block-65 (media 62-65)",
+    r'ECOM API block-\d+[^"]*',
+    'ECOM API block-65 (media 62-65)',
     text,
     count=1,
 )
@@ -259,8 +241,9 @@ text = re.sub(
 )
 
 MAIN.write_text(text)
+out = MAIN.read_text()
 print("Patched", MAIN)
-print("  media import:", "packages/media" in MAIN.read_text())
-print("  images route:", "@Post('images')" in MAIN.read_text() or "Block 62" in MAIN.read_text())
-print("  pre-sale:", "pre-sale" in MAIN.read_text() or "preSale" in MAIN.read_text())
-print("  block 65:", "block: 65" in MAIN.read_text())
+print("  media import:", "packages/media" in out)
+print("  images route:", "@Post('images')" in out)
+print("  pre-sale:", "preSale" in out)
+print("  block 65 in health area:", "block: 65" in out.split("class DiscoveryController")[0])
