@@ -116,38 +116,26 @@ METHOD = r'''
 '''
 
 if "@Post('upload-video')" not in text:
-    # insert before closing of PhaseCController — find renderVideo method end is hard;
-    # insert right after "class PhaseCController {"
     marker = 'class PhaseCController {'
     if marker not in text:
         print('ERROR: PhaseCController not found')
         raise SystemExit(1)
-    # Prefer insert after first method meta() block — append before last }
-    # of PhaseCController by finding "@Post('render-video')" and inserting after that whole method
+
     if "@Post('render-video')" in text:
-        # Find the method and insert after its closing - use unique string near end of renderVideo return
-        anchor = "panel: panelItems.length\n        ? { title: 'Render con avisos / errores', items: panelItems }\n        : { title: 'Render MP4 OK', items: [] },\n    };\n  }\n}"
-        # PhaseCController might close after renderVideo - insert method before final }
- of controller
         idx = text.find("@Post('render-video')")
-        if idx < 0:
-            print('no render-video')
-            raise SystemExit(1)
-        # find end of renderVideo: next "\n  @" or "\n}" at class level after idx
-        # Simple approach: insert METHOD before "\n}\n\n@Controller('phase-b')" or similar
+        inserted = False
         for close in [
             "\n}\n\n@Controller('phase-b')",
             "\n}\n\n@Controller('phase-a')",
             "\n}\n\n@Controller('autonomy')",
             "\n}\n\n@Controller('health')",
         ]:
-            # only the PhaseC controller close - search from idx
             pos = text.find(close, idx)
             if pos > 0:
                 text = text[:pos] + '\n' + METHOD + text[pos:]
+                inserted = True
                 break
-        else:
-            # fallback: after class PhaseCController {
+        if not inserted:
             text = text.replace(marker, marker + '\n' + METHOD, 1)
     else:
         text = text.replace(marker, marker + '\n' + METHOD, 1)
