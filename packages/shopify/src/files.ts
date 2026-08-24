@@ -1,6 +1,9 @@
 /**
- * Shopify Files upload (GraphQL stagedUploadsCreate → PUT → fileCreate)
- * Requires scope: write_files (or write_themes on older apps)
+ * Shopify Files upload (GraphQL stagedUploadsCreate → PUT → optional fileCreate)
+ * Requires scope: write_files
+ *
+ * For product VIDEO media: use resource=VIDEO + skipFileCreate=true,
+ * then pass resourceUrl to productCreateMedia.
  */
 
 import * as fs from 'fs';
@@ -27,6 +30,7 @@ export type UploadFileResult = {
   mock: boolean;
   fileId?: string;
   url?: string;
+  resourceUrl?: string;
   adminUrl?: string;
   error?: string;
   raw?: unknown;
@@ -48,13 +52,15 @@ async function graphql(token: string, query: string, variables?: Record<string, 
 }
 
 /**
- * Upload a local file (e.g. /tmp/...mp4) to Shopify Files CDN.
+ * Upload a local file (e.g. /tmp/...mp4) to Shopify staged storage / Files.
  */
 export async function uploadLocalFileToShopify(input: {
   filePath: string;
   filename?: string;
   mimeType?: string;
   resource?: 'FILE' | 'VIDEO' | 'IMAGE';
+  /** When true, only stagedUploadsCreate + binary POST (no fileCreate). Best for productCreateMedia VIDEO. */
+  skipFileCreate?: boolean;
 }): Promise<UploadFileResult> {
   const status = getShopifyStatus();
   const filePath = input.filePath;
@@ -62,10 +68,15 @@ export async function uploadLocalFileToShopify(input: {
     return { ok: false, mock: false, error: 'file_not_found' };
   }
 
-  const filename =
+  let filename =
     input.filename || path.basename(filePath) || `ecom-${Date.now()}.mp4`;
+  // Ensure .mp4 extension for video
+  if ((input.resource === 'VIDEO' || (input.mimeType || '').includes('video')) && !/\.mp4$/i.test(filename)) {
+    filename = filename.replace(/\.[^.]+$/, '') + '.mp4';
+  }
   const mimeType = input.mimeType || 'video/mp4';
   const resource = input.resource || 'FILE';
+  const skipFileCreate = input.skipFileCreate === true || resource === 'VIDEO';
   const buf = fs.readFileSync(filePath);
   const fileSize = buf.length;
 
@@ -75,6 +86,7 @@ export async function uploadLocalFileToShopify(input: {
       mock: true,
       fileId: `mock-file-${Date.now()}`,
       url: `https://cdn.shopify.com/s/files/mock/${filename}`,
+      resourceUrl: `https://cdn.shopify.com/s/files/mock/${filename}`,
       adminUrl: 'https://admin.shopify.com/store/mock/content/files',
       raw: { simulated: true, filename, fileSize },
     };
@@ -87,7 +99,6 @@ export async function uploadLocalFileToShopify(input: {
   const token = tokenRes.token;
 
   try {
-    // 1) Stage upload
     const stageMutation = `
       mutation stagedUploadsCreate($input: [StagedUploadInput!]!) {
         stagedUploadsCreate(input: $input) {
@@ -134,7 +145,6 @@ export async function uploadLocalFileToShopify(input: {
       };
     }
 
-    // 2) Upload binary to staged URL (multipart form)
     const form = new FormData();
     for (const p of target.parameters || []) {
       form.append(p.name, p.value);
@@ -151,7 +161,19 @@ export async function uploadLocalFileToShopify(input: {
       };
     }
 
-    // 3) fileCreate
+    // VIDEO for productCreateMedia: return resourceUrl only (skip fileCreate)
+    if (skipFileCreate) {
+      const host = shopHost();
+      return {
+        ok: true,
+        mock: false,
+        url: target.resourceUrl,
+        resourceUrl: target.resourceUrl,
+        adminUrl: host ? `https://${host}/admin/content/files` : undefined,
+        raw: { stagedOnly: true, resourceUrl: target.resourceUrl, filename, resource },
+      };
+    }
+
     const fileMutation = `
       mutation fileCreate($files: [FileCreateInput!]!) {
         fileCreate(files: $files) {
@@ -166,12 +188,15 @@ export async function uploadLocalFileToShopify(input: {
         }
       }
     `;
+    const contentType =
+      resource === 'VIDEO' ? 'VIDEO' : resource === 'IMAGE' ? 'IMAGE' : 'FILE';
     const fileVars = {
       files: [
         {
           originalSource: target.resourceUrl,
-          contentType: resource === 'VIDEO' ? 'VIDEO' : resource === 'IMAGE' ? 'IMAGE' : 'FILE',
-          filename,
+          contentType,
+          // Omit filename when it causes "extension must match" on VIDEO
+          ...(resource === 'FILE' ? { filename } : {}),
         },
       ],
     };
@@ -211,6 +236,7 @@ export async function uploadLocalFileToShopify(input: {
       mock: false,
       fileId: f.id,
       url,
+      resourceUrl: target.resourceUrl,
       adminUrl: host ? `https://${host}/admin/content/files` : undefined,
       raw: { file: f, resourceUrl: target.resourceUrl },
     };
