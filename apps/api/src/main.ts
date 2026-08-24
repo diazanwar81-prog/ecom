@@ -3605,4 +3605,7 @@ async function bootstrap() {
   const app = await NestFactory.create(AppModule);
   app.enableCors({ origin: process.env.APP_URL ?? 'http://localhost:3000' });
   await app.listen(Number(process.env.API_PORT ?? 4000));
-  console.log(`ECOM API block-65 (media 62-65)
+  console.log(`ECOM API block-65 (media 62-65) on ${process.env.API_PORT ?? 4000} mode=${MODE}`);
+}
+
+void bootstrap();
