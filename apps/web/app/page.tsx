@@ -443,14 +443,14 @@ export default function Home() {
   async function activateRealMode() {
     if (realBusy) return;
     const ok = window.confirm(
-      '¿Activar modo REAL en este proceso?
+      'Activar modo REAL en este proceso?
 
 ' +
-        '• Publicará/fulfill con credenciales live
+        '- Publicara/fulfill con credenciales live
 ' +
-        '• No modifica el archivo .env
+        '- No modifica el archivo .env
 ' +
-        '• Reiniciar Docker puede volver a SANDBOX
+        '- Reiniciar Docker puede volver a SANDBOX
 
 ' +
         'Confirma solo si completaste checklist HTTPS/webhooks/CJ/Shopify.',
