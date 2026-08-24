@@ -17,7 +17,6 @@ IMPORT = """import {
 """
 
 if "packages/media/src/index" not in text:
-    # insert after content import block (second CONTENT_META import area)
     anchor = "from '../../../packages/content/src/index';"
     idx = text.rfind(anchor)
     if idx < 0:
@@ -25,18 +24,22 @@ if "packages/media/src/index" not in text:
     end = idx + len(anchor)
     text = text[:end] + "\n\n" + IMPORT + text[end:]
 
-# Bump health block to 65
-text = re.sub(
-    r"block:\s*61,\s*\n(\s*)aiRouter:",
-    r"block: 65,\n\1aiRouter:",
+# Bump first health block: 61 -> 65
+text, n_health = re.subn(
+    r"(async health\(\)[\s\S]*?block:\s*)61(,")",
+    r"\g<1>65\2",
     text,
     count=1,
 )
+if n_health == 0:
+    text, n_health = re.subn(
+        r"block:\s*61,(\s*\n\s*aiRouter:)",
+        r"block: 65,\1",
+        text,
+        count=1,
+    )
 
-# CreativeController: replace class body methods addition before closing of CreativeController
-# Find CreativeController and inject new routes before the last method or end of class
-
-EXTRA_METHODS = r'''
+EXTRA_METHODS = '''
   @Get('media-meta')
   mediaMeta() {
     return { mode: process.env.ECOM_MODE || 'MOCK', ...MEDIA_META };
@@ -139,13 +142,15 @@ EXTRA_METHODS = r'''
       salePrice: p.salePrice != null ? Number(p.salePrice) : undefined,
       currency: p.currency || 'COP',
     });
-    const images = generateImageAssets(brief.brief.mediaPlan, { productTitle: brief.brief.productName });
+    const images = generateImageAssets(brief.brief.mediaPlan, {
+      productTitle: brief.brief.productName,
+    });
     const videos = generateVideoAssets(brief.brief.mediaPlan);
     let shopifyUrl: string | undefined;
     if (p.externalId) {
       const shop = process.env.SHOPIFY_SHOP_DOMAIN || process.env.SHOPIFY_SHOP || '';
       if (shop) {
-        shopifyUrl = `https://${String(shop).replace(/^https?:\/\//, '')}/products/${p.externalId}`;
+        shopifyUrl = `https://${String(shop).replace(/^https?:\\/\\//, '')}/products/${p.externalId}`;
       }
     }
     const pack = buildLandingPack({
@@ -195,7 +200,7 @@ EXTRA_METHODS = r'''
       mode: process.env.ECOM_MODE || 'MOCK',
       shopifyLive: String(process.env.SHOPIFY_ACCESS_TOKEN || '').length > 5,
       cjLive: String(process.env.CJ_API_KEY || '').length > 5,
-      httpsPublic: /^https:\/\//i.test(apiUrl),
+      httpsPublic: /^https:\\/\\//i.test(apiUrl),
       webhookSecret: String(process.env.SHOPIFY_WEBHOOK_SECRET || '').length > 3,
       publishedWithCj,
       pendingApprovals,
@@ -220,17 +225,26 @@ EXTRA_METHODS = r'''
           : checklist.items.filter((i) => !i.ok).map((i) => i.message),
     };
   }
+
 '''
 
+# Fix accidental double-escaped regex in template (shopify URL + https test)
+EXTRA_METHODS = EXTRA_METHODS.replace(
+    "replace(/^https?:\\\\/\\\\//, '')",
+    "replace(/^https?:\\/\\//, '')",
+)
+EXTRA_METHODS = EXTRA_METHODS.replace(
+    "/^https:\\\\/\\\\//i.test(apiUrl)",
+    "/^https:\\/\\//i.test(apiUrl)",
+)
+
 if "@Post('images')" not in text and "Block 62: image assets" not in text:
-    # Insert before landing-preview or end of CreativeController
     marker = "  @Post('landing-preview')"
     if marker not in text:
         raise SystemExit("landing-preview not found in CreativeController")
-    text = text.replace(marker, EXTRA_METHODS + "\n" + marker, 1)
+    text = text.replace(marker, EXTRA_METHODS + marker, 1)
 
-# Fix creative brief block label stays 61; pack endpoints carry 62-65
-# Update bootstrap log
+# Bootstrap log
 text = re.sub(
     r"ECOM API block-\d+[^"]*",
     "ECOM API block-65 (media 62-65)",
@@ -246,6 +260,7 @@ text = re.sub(
 
 MAIN.write_text(text)
 print("Patched", MAIN)
-print("  media import:", "packages/media" in text)
-print("  images route:", "@Post('images')" in text or "Block 62" in text)
-print("  block 65 health:", "block: 65" in text)
+print("  media import:", "packages/media" in MAIN.read_text())
+print("  images route:", "@Post('images')" in MAIN.read_text() or "Block 62" in MAIN.read_text())
+print("  pre-sale:", "pre-sale" in MAIN.read_text() or "preSale" in MAIN.read_text())
+print("  block 65:", "block: 65" in MAIN.read_text())
