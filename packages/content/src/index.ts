@@ -1,8 +1,8 @@
 /**
  * ECOM Content
  * - Block 29: landing HTML
- * - Block 61: creative product brief
- * - Block 62-ready: media plan with prompt_gen (EN), aspectRatio, negativePrompt
+ * - Block 61: creative product brief + media PLAN (prompt, promptGen, aspect, negatives)
+ * - Block 62: image/video ASSET generation (consumes mediaPlan.promptGen) — not this file yet
  */
 
 import { complete, type AiResponse } from '../../ai-router/src/index';
@@ -100,7 +100,7 @@ export type MediaImageSpec = {
   role: string;
   /** Human-readable brief in Spanish */
   prompt: string;
-  /** Technical prompt for image models (English preferred) */
+  /** Technical prompt for image models (English preferred) — consumed by block 62 */
   promptGen: string;
   aspectRatio: '1:1' | '4:5' | '9:16' | '16:9';
   negativePrompt: string;
@@ -291,7 +291,6 @@ const DETAIL_NEG = GLOBAL_NEG + ', full body, distant shot, text, diagram labels
 const INFO_NEG =
   GLOBAL_NEG + ', unreadable text, random letters, medical claims, before-after skin, body distortion';
 
-/** Map Spanish commercial name → short English subject for image models */
 export function productSubjectEn(productName: string, niche: string): string {
   const n = (productName || '').toLowerCase();
   const voice = NICHE_VOICE[niche] || NICHE_VOICE.general;
@@ -307,7 +306,6 @@ export function productSubjectEn(productName: string, niche: string): string {
   if (/chaqueta|fleco/.test(n)) return 'fashion jacket with fringe detail, apparel product';
   if (/l[aá]mpara|led/.test(n)) return 'portable LED lamp, modern minimal design';
 
-  // fallback: keep name + niche hint
   return `${productName}, ${voice.subjectHintEn}`;
 }
 
@@ -849,8 +847,10 @@ export function validateBrief(brief: CreativeBrief): {
   return { ok: hard.length === 0, issues };
 }
 
+/** Block 61 = creative brief + media PLAN. Block 62 = asset generation (separate). */
 export const CONTENT_META = {
   block: 61,
+  nextBlock: 62,
   features: [
     'landing_html',
     'creative_brief',
@@ -865,5 +865,6 @@ export const CONTENT_META = {
     'polish_es_postprocess',
     'honest_important_info',
   ],
-  note: 'Media plan listo para bloque 62: prompt (ES) + promptGen (EN) + aspectRatio + negativePrompt.',
+  note:
+    'Bloque 61: brief + plan de medios (prompt ES, promptGen EN, aspectRatio, negativePrompt). Bloque 62: generar assets de imagen/video a partir de promptGen (aún no implementado).',
 };
