@@ -1,6 +1,7 @@
 /**
  * ECOM Shopify adapter
  * Phase A: client-credentials token refresh + inventory after publish
+ * Phase B2: strip placeholder image URLs before Admin API
  */
 
 export type RuntimeMode = 'MOCK' | 'SANDBOX' | 'REAL';
@@ -111,6 +112,17 @@ function shopHost() {
   return shop.includes('.') ? shop : `${shop}.myshopify.com`;
 }
 
+function isPlaceholderUrl(u: string): boolean {
+  const s = String(u || '').toLowerCase();
+  return (
+    s.includes('placehold.co') ||
+    s.includes('placeholder.com') ||
+    s.includes('via.placeholder') ||
+    s.includes('dummyimage.com') ||
+    s.includes('picsum.photos')
+  );
+}
+
 /** Refresh via client_credentials when SHOPIFY_CLIENT_ID/SECRET present. */
 export async function ensureShopifyAccessToken(): Promise<{
   ok: boolean;
@@ -143,7 +155,6 @@ export async function ensureShopifyAccessToken(): Promise<{
     });
     const data = (await res.json()) as any;
     if (!res.ok || !data?.access_token) {
-      // fall back to static if refresh fails
       if (staticTok && staticTok.length > 10) {
         return { ok: true, token: staticTok, refreshed: false, error: data?.error || `refresh_http_${res.status}` };
       }
@@ -155,7 +166,6 @@ export async function ensureShopifyAccessToken(): Promise<{
     memoryToken = String(data.access_token);
     const expiresIn = Number(data.expires_in || 86399);
     memoryTokenExpiresAt = Date.now() + expiresIn * 1000;
-    // also surface for process (same process only)
     process.env.SHOPIFY_ACCESS_TOKEN = memoryToken;
     return { ok: true, token: memoryToken, refreshed: true, expiresIn };
   } catch (e: any) {
@@ -164,11 +174,6 @@ export async function ensureShopifyAccessToken(): Promise<{
     }
     return { ok: false, error: e?.message || 'refresh_network_error' };
   }
-}
-
-async function accessToken(): Promise<string> {
-  const r = await ensureShopifyAccessToken();
-  return r.token || '';
 }
 
 function hasCreds() {
@@ -229,8 +234,9 @@ export async function publishProduct(input: PublishInput): Promise<PublishResult
   }
   const token = tokenRes.token;
   const host = shopHost();
+  // Never send placehold.co / dummy URLs to Shopify
   const images = (input.imageUrls || [])
-    .filter((u) => typeof u === 'string' && /^https?:\/\//i.test(u))
+    .filter((u) => typeof u === 'string' && /^https?:\/\//i.test(u) && !isPlaceholderUrl(u))
     .slice(0, 5)
     .map((src) => ({ src }));
 
