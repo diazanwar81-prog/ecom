@@ -1,7 +1,6 @@
 /**
  * ECOM Shopify adapter
- * - MOCK / SANDBOX / REAL
- * - publish products (with images) + create fulfillments with tracking
+ * Phase A: client-credentials token refresh + inventory after publish
  */
 
 export type RuntimeMode = 'MOCK' | 'SANDBOX' | 'REAL';
@@ -13,6 +12,7 @@ export interface ShopifyStatus {
   apiVersion: string;
   note: string;
   canPublishLive: boolean;
+  tokenRefreshReady?: boolean;
 }
 
 export interface PublishInput {
@@ -22,7 +22,7 @@ export interface PublishInput {
   currency: string;
   sku?: string;
   inventory?: number | null;
-  /** Public image URLs (e.g. CJ CDN) */
+  weightGrams?: number | null;
   imageUrls?: string[];
 }
 
@@ -33,6 +33,7 @@ export interface PublishResult {
   adminUrl?: string;
   error?: string;
   raw?: unknown;
+  inventorySync?: InventorySetResult | null;
 }
 
 export interface FulfillmentInput {
@@ -61,7 +62,25 @@ export interface MockOrder {
   createdAt: string;
 }
 
+export interface InventorySetInput {
+  inventoryItemId: string;
+  available: number;
+  locationId?: string;
+}
+
+export interface InventorySetResult {
+  ok: boolean;
+  mock: boolean;
+  available?: number;
+  locationId?: string;
+  error?: string;
+  raw?: unknown;
+}
+
 const API_VERSION = process.env.SHOPIFY_API_VERSION || '2026-07';
+
+let memoryToken: string | null = null;
+let memoryTokenExpiresAt = 0;
 
 function env(name: string, fallback = '') {
   return (process.env[name] ?? fallback).replace(/\r/g, '').trim();
@@ -77,19 +96,85 @@ function shopDomain() {
   return env('SHOPIFY_SHOP_DOMAIN') || env('SHOPIFY_SHOP') || null;
 }
 
-function accessToken() {
+function staticAccessToken() {
   return env('SHOPIFY_ACCESS_TOKEN');
 }
 
-function hasCreds() {
-  const shop = shopDomain();
-  const token = accessToken();
-  return Boolean(shop && token && token.length > 10 && !token.includes('replace'));
+function hasClientCreds() {
+  const id = env('SHOPIFY_CLIENT_ID');
+  const secret = env('SHOPIFY_CLIENT_SECRET');
+  return Boolean(id && secret && id.length > 8 && secret.length > 8);
 }
 
 function shopHost() {
   const shop = shopDomain()!;
   return shop.includes('.') ? shop : `${shop}.myshopify.com`;
+}
+
+/** Refresh via client_credentials when SHOPIFY_CLIENT_ID/SECRET present. */
+export async function ensureShopifyAccessToken(): Promise<{
+  ok: boolean;
+  token?: string;
+  refreshed?: boolean;
+  error?: string;
+  expiresIn?: number;
+}> {
+  const staticTok = staticAccessToken();
+  if (memoryToken && Date.now() < memoryTokenExpiresAt - 60_000) {
+    return { ok: true, token: memoryToken, refreshed: false };
+  }
+  if (!hasClientCreds()) {
+    if (staticTok && staticTok.length > 10 && !staticTok.includes('replace')) {
+      return { ok: true, token: staticTok, refreshed: false };
+    }
+    return { ok: false, error: 'missing_token_and_client_creds' };
+  }
+  const host = shopDomain() ? shopHost() : null;
+  if (!host) return { ok: false, error: 'missing_shop_domain' };
+  try {
+    const res = await fetch(`https://${host}/admin/oauth/access_token`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'client_credentials',
+        client_id: env('SHOPIFY_CLIENT_ID'),
+        client_secret: env('SHOPIFY_CLIENT_SECRET'),
+      }).toString(),
+    });
+    const data = (await res.json()) as any;
+    if (!res.ok || !data?.access_token) {
+      // fall back to static if refresh fails
+      if (staticTok && staticTok.length > 10) {
+        return { ok: true, token: staticTok, refreshed: false, error: data?.error || `refresh_http_${res.status}` };
+      }
+      return {
+        ok: false,
+        error: data?.error_description || data?.error || `refresh_http_${res.status}`,
+      };
+    }
+    memoryToken = String(data.access_token);
+    const expiresIn = Number(data.expires_in || 86399);
+    memoryTokenExpiresAt = Date.now() + expiresIn * 1000;
+    // also surface for process (same process only)
+    process.env.SHOPIFY_ACCESS_TOKEN = memoryToken;
+    return { ok: true, token: memoryToken, refreshed: true, expiresIn };
+  } catch (e: any) {
+    if (staticTok && staticTok.length > 10) {
+      return { ok: true, token: staticTok, refreshed: false, error: e?.message };
+    }
+    return { ok: false, error: e?.message || 'refresh_network_error' };
+  }
+}
+
+async function accessToken(): Promise<string> {
+  const r = await ensureShopifyAccessToken();
+  return r.token || '';
+}
+
+function hasCreds() {
+  const shop = shopDomain();
+  const token = staticAccessToken() || memoryToken;
+  return Boolean(shop && token && String(token).length > 10 && !String(token).includes('replace'));
 }
 
 export function getShopifyStatus(): ShopifyStatus {
@@ -104,8 +189,11 @@ export function getShopifyStatus(): ShopifyStatus {
     shopDomain: shopDomain(),
     apiVersion: API_VERSION,
     canPublishLive,
+    tokenRefreshReady: hasClientCreds(),
     note: canPublishLive
-      ? 'Credenciales presentes — publish/fulfill usará Admin API'
+      ? hasClientCreds()
+        ? 'Credenciales + client_id/secret — publish live + refresh listo'
+        : 'Token estático — publish live (renueva token si expira)'
       : 'Sin shop/token o modo MOCK — publish simulado (MOCK)',
   };
 }
@@ -120,22 +208,34 @@ export async function publishProduct(input: PublishInput): Promise<PublishResult
       mock: true,
       externalId,
       adminUrl: `https://admin.shopify.com/store/mock/products/${externalId}`,
+      inventorySync: {
+        ok: true,
+        mock: true,
+        available: Math.max(0, Math.floor(Number(input.inventory) || 0)),
+      },
       raw: {
         simulated: true,
         title: input.title,
         price: input.price,
-        currency: input.currency,
+        inventory: input.inventory,
         imageUrls: input.imageUrls,
       },
     };
   }
 
-  const token = accessToken();
+  const tokenRes = await ensureShopifyAccessToken();
+  if (!tokenRes.ok || !tokenRes.token) {
+    return { ok: false, mock: false, externalId: '', error: tokenRes.error || 'no_token' };
+  }
+  const token = tokenRes.token;
   const host = shopHost();
   const images = (input.imageUrls || [])
     .filter((u) => typeof u === 'string' && /^https?:\/\//i.test(u))
     .slice(0, 5)
     .map((src) => ({ src }));
+
+  const invQty = input.inventory != null ? Math.max(0, Math.floor(Number(input.inventory))) : null;
+  const grams = input.weightGrams != null ? Math.max(0, Math.floor(Number(input.weightGrams))) : 0;
 
   const body: any = {
     product: {
@@ -146,7 +246,12 @@ export async function publishProduct(input: PublishInput): Promise<PublishResult
         {
           price: String(input.price),
           sku: input.sku || undefined,
-          inventory_management: input.inventory != null ? 'shopify' : undefined,
+          inventory_management: 'shopify',
+          inventory_policy: 'deny',
+          grams,
+          weight: grams / 1000,
+          weight_unit: 'kg',
+          requires_shipping: true,
         },
       ],
       images: images.length ? images : undefined,
@@ -176,12 +281,22 @@ export async function publishProduct(input: PublishInput): Promise<PublishResult
     }
 
     const id = String(data?.product?.id ?? '');
+    const invItemId = data?.product?.variants?.[0]?.inventory_item_id;
+    let inventorySync: InventorySetResult | null = null;
+    if (invItemId != null && invQty != null) {
+      inventorySync = await setInventoryLevel({
+        inventoryItemId: String(invItemId),
+        available: invQty,
+      });
+    }
+
     return {
       ok: Boolean(id),
       mock: false,
       externalId: id,
       adminUrl: id ? `https://${host}/admin/products/${id}` : undefined,
       raw: data,
+      inventorySync,
     };
   } catch (e: any) {
     return {
@@ -208,14 +323,15 @@ export async function createOrderFulfillment(input: FulfillmentInput): Promise<F
     };
   }
 
-  const token = accessToken();
+  const tokenRes = await ensureShopifyAccessToken();
+  const token = tokenRes.token || '';
   const host = shopHost();
   const orderId = String(input.orderId).replace(/\D/g, '') || input.orderId;
 
   try {
     const foRes = await fetch(
       `https://${host}/admin/api/${API_VERSION}/orders/${orderId}/fulfillment_orders.json`,
-      { headers: { 'X-Shopify-Access-Token': token! } },
+      { headers: { 'X-Shopify-Access-Token': token } },
     );
     const foData = (await foRes.json()) as any;
 
@@ -248,7 +364,7 @@ export async function createOrderFulfillment(input: FulfillmentInput): Promise<F
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'X-Shopify-Access-Token': token!,
+          'X-Shopify-Access-Token': token,
         },
         body: JSON.stringify(body),
       });
@@ -283,7 +399,7 @@ export async function createOrderFulfillment(input: FulfillmentInput): Promise<F
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'X-Shopify-Access-Token': token!,
+          'X-Shopify-Access-Token': token,
         },
         body: JSON.stringify(legacyBody),
       },
@@ -320,39 +436,35 @@ export function createMockOrder(productTitle: string, price: number, currency = 
   };
 }
 
-
-export interface InventorySetInput {
-  inventoryItemId: string;
-  available: number;
-  locationId?: string;
-}
-
-export interface InventorySetResult {
+export async function getPrimaryLocationId(): Promise<{
   ok: boolean;
-  mock: boolean;
-  available?: number;
   locationId?: string;
   error?: string;
-  raw?: unknown;
-}
-
-export async function getPrimaryLocationId(): Promise<{ ok: boolean; locationId?: string; error?: string; mock?: boolean }> {
+  mock?: boolean;
+}> {
   const status = getShopifyStatus();
   if (!status.canPublishLive) {
     return { ok: true, locationId: 'mock-location', mock: true };
   }
-  const token = accessToken();
+  const tokenRes = await ensureShopifyAccessToken();
+  const token = tokenRes.token || '';
   const host = shopHost();
   try {
     const res = await fetch(`https://${host}/admin/api/${API_VERSION}/locations.json`, {
-      headers: { 'X-Shopify-Access-Token': token! },
+      headers: { 'X-Shopify-Access-Token': token },
     });
     const data = (await res.json()) as any;
     if (!res.ok) {
-      return { ok: false, error: data?.errors ? JSON.stringify(data.errors) : `locations HTTP ${res.status}` };
+      return {
+        ok: false,
+        error: data?.errors ? JSON.stringify(data.errors) : `locations HTTP ${res.status}`,
+      };
     }
     const locs = data?.locations || [];
-    const active = locs.find((l: any) => l.active && l.legacy === false) || locs.find((l: any) => l.active) || locs[0];
+    const active =
+      locs.find((l: any) => l.active && l.legacy === false) ||
+      locs.find((l: any) => l.active) ||
+      locs[0];
     if (!active?.id) return { ok: false, error: 'no_location' };
     return { ok: true, locationId: String(active.id) };
   } catch (e: any) {
@@ -377,7 +489,8 @@ export async function setInventoryLevel(input: InventorySetInput): Promise<Inven
     };
   }
 
-  const token = accessToken();
+  const tokenRes = await ensureShopifyAccessToken();
+  const token = tokenRes.token || '';
   const host = shopHost();
   let locationId = input.locationId;
   if (!locationId) {
@@ -393,7 +506,7 @@ export async function setInventoryLevel(input: InventorySetInput): Promise<Inven
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'X-Shopify-Access-Token': token!,
+        'X-Shopify-Access-Token': token,
       },
       body: JSON.stringify({
         location_id: Number(locationId),
