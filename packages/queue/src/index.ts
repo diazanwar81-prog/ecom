@@ -6,7 +6,7 @@
 
 import { Queue, type JobsOptions } from 'bullmq';
 
-export type JobName = 'discovery:run' | 'product:pipeline';
+export type JobName = 'discovery:run' | 'product:pipeline' | 'product:media-sync';
 
 export interface DiscoveryJobData {
   limit?: number;
@@ -20,6 +20,10 @@ export interface PipelineJobData {
   skipAiCopy?: boolean;
 }
 
+export interface MediaJobData {
+  productId: string;
+}
+
 function redisUrl() {
   return (process.env.REDIS_URL || 'redis://127.0.0.1:6379').trim();
 }
@@ -30,6 +34,7 @@ function connection() {
 
 let discoveryQueue: Queue | null = null;
 let pipelineQueue: Queue | null = null;
+let mediaQueue: Queue | null = null;
 
 function getDiscoveryQueue() {
   if (!discoveryQueue) {
@@ -43,6 +48,21 @@ function getPipelineQueue() {
     pipelineQueue = new Queue('ecom-pipeline', { connection: connection() });
   }
   return pipelineQueue;
+}
+
+function getMediaQueue() {
+  if (!mediaQueue) {
+    mediaQueue = new Queue('ecom-media', {
+      connection: connection(),
+      defaultJobOptions: {
+        ...defaultOpts,
+        // CJ QPS ~1/s — stagger retries
+        attempts: 4,
+        backoff: { type: 'fixed', delay: 1500 },
+      },
+    });
+  }
+  return mediaQueue;
 }
 
 const defaultOpts: JobsOptions = {
@@ -62,7 +82,7 @@ export function getQueueStatus() {
   return {
     block: 13,
     redisUrl: redisUrl().replace(/:\/\/.*@/, '://***@'),
-    queues: ['ecom-discovery', 'ecom-pipeline'],
+    queues: ['ecom-discovery', 'ecom-pipeline', 'ecom-media'],
     scheduler: {
       enabled: intervalMin > 0,
       intervalMinutes: intervalMin,
@@ -88,6 +108,35 @@ export async function enqueuePipeline(data: PipelineJobData) {
   const job = await q.add('product:pipeline', data, defaultOpts);
   return { ok: true, queue: 'ecom-pipeline', jobId: job.id, name: 'product:pipeline', data };
 }
+
+export async function enqueueMedia(data: MediaJobData) {
+  if (!data.productId) throw new Error('productId required');
+  const q = getMediaQueue();
+  const job = await q.add('product:media-sync', data, {
+    ...defaultOpts,
+    attempts: 4,
+    backoff: { type: 'fixed', delay: 1500 },
+    // unique per product while waiting/active
+    jobId: `media-${data.productId}`,
+  });
+  return { ok: true, queue: 'ecom-media', jobId: job.id, name: 'product:media-sync', data };
+}
+
+export async function enqueueMediaBulk(productIds: string[]) {
+  const results: { productId: string; jobId?: string; error?: string }[] = [];
+  for (const productId of productIds) {
+    try {
+      const job = await enqueueMedia({ productId });
+      results.push({ productId, jobId: String(job.jobId) });
+    } catch (e: any) {
+      // jobId duplicate is fine — already queued
+      const msg = e?.message || String(e);
+      results.push({ productId, error: msg.includes('Job') ? 'already_queued_or_exists' : msg });
+    }
+  }
+  return { ok: true, queue: 'ecom-media', enqueued: results.filter((r) => r.jobId).length, results };
+}
+
 
 export async function listRecentJobs(limit = 20) {
   const dq = getDiscoveryQueue();
@@ -178,6 +227,7 @@ export function startDiscoveryScheduler() {
 export async function startWorkers(handlers: {
   onDiscovery: (data: DiscoveryJobData) => Promise<unknown>;
   onPipeline: (data: PipelineJobData) => Promise<unknown>;
+  onMedia?: (data: MediaJobData) => Promise<unknown>;
 }) {
   const { Worker } = await import('bullmq');
   const conn = connection();
@@ -194,13 +244,36 @@ export async function startWorkers(handlers: {
     { connection: conn, concurrency: 2 },
   );
 
+  // CJ API QPS = 1/s — single concurrency + limiter
+  const mediaWorker = new Worker(
+    'ecom-media',
+    async (job) => {
+      if (!handlers.onMedia) return { skipped: true };
+      const result = await handlers.onMedia(job.data as MediaJobData);
+      // hard pacing after each CJ call
+      await new Promise((r) => setTimeout(r, 1200));
+      return result;
+    },
+    {
+      connection: conn,
+      concurrency: 1,
+      limiter: { max: 1, duration: 1200 },
+    },
+  );
+
   discoveryWorker.on('failed', (job, err) => {
     console.warn('[queue] discovery failed', job?.id, err.message);
   });
   pipelineWorker.on('failed', (job, err) => {
     console.warn('[queue] pipeline failed', job?.id, err.message);
   });
+  mediaWorker.on('failed', (job, err) => {
+    console.warn('[queue] media failed', job?.id, err.message);
+  });
+  mediaWorker.on('completed', (job) => {
+    console.log('[queue] media done', job.id, job.returnvalue);
+  });
 
-  console.log('[queue] workers started: ecom-discovery, ecom-pipeline');
-  return { discoveryWorker, pipelineWorker };
+  console.log('[queue] workers started: ecom-discovery, ecom-pipeline, ecom-media (1/s)');
+  return { discoveryWorker, pipelineWorker, mediaWorker };
 }

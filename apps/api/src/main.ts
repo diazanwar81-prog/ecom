@@ -41,6 +41,8 @@ import { prisma, ProductStatus, ApprovalStatus, RuntimeMode } from '../../../pac
 import {
   enqueueDiscovery,
   enqueuePipeline,
+  enqueueMedia,
+  enqueueMediaBulk,
   listRecentJobs,
   getQueueStatus,
   startWorkers,
@@ -840,6 +842,52 @@ class JobsController {
       return { mode: MODE, ...job };
     } catch (e: any) {
       return { mode: MODE, error: e?.message || 'enqueue_failed' };
+    }
+  }
+
+  @Post('media')
+  async mediaJob(@Body() body: { productId?: string }) {
+    if (!body.productId) return { error: 'productId_required' };
+    try {
+      const job = await enqueueMedia({ productId: body.productId });
+      await writeAudit('JOB_ENQUEUED', 'Queue', String(job.jobId), job);
+      return { mode: MODE, ...job };
+    } catch (e: any) {
+      return { mode: MODE, error: e?.message || 'enqueue_failed' };
+    }
+  }
+
+  @Post('media/bulk')
+  async mediaBulk(@Body() body: { productIds?: string[]; onlyMissing?: boolean }) {
+    let ids = body.productIds || [];
+    if (!ids.length) {
+      const rows = await prisma.product.findMany({
+        include: { suppliers: { orderBy: { isPrimary: 'desc' } } },
+        orderBy: { createdAt: 'desc' },
+        take: 100,
+      });
+      const onlyMissing = body.onlyMissing !== false;
+      ids = rows
+        .filter((p) => {
+          const hasSku = p.suppliers?.some((s) => s.cjSku);
+          if (!hasSku) return false;
+          if (!onlyMissing) return true;
+          const imgs = p.imageUrls as any;
+          const n = Array.isArray(imgs) ? imgs.length : 0;
+          return n === 0;
+        })
+        .map((p) => p.id);
+    }
+    if (!ids.length) return { mode: MODE, enqueued: 0, note: 'nothing to sync' };
+    try {
+      const result = await enqueueMediaBulk(ids);
+      await writeAudit('JOB_MEDIA_BULK', 'Queue', 'bulk', {
+        enqueued: result.enqueued,
+        total: ids.length,
+      });
+      return { mode: MODE, ...result };
+    } catch (e: any) {
+      return { mode: MODE, error: e?.message || 'bulk_failed' };
     }
   }
 
@@ -5272,6 +5320,31 @@ async function bootstrap() {
         });
         await saveAgentRun(result, { productId: p.id, storeId: p.storeId });
         return { status: result.status, traceId: result.traceId };
+      },
+      onMedia: async (data) => {
+        const p = await prisma.product.findUnique({
+          where: { id: data.productId },
+          include: { suppliers: { orderBy: { isPrimary: 'desc' } } },
+        });
+        if (!p) return { error: 'not_found', productId: data.productId };
+        const primary = p.suppliers?.[0];
+        const urls = await resolveCjImageUrls(p.title, primary?.cjSku || null);
+        if (urls.length === 0) {
+          return { productId: data.productId, count: 0, note: 'no_images' };
+        }
+        try {
+          await prisma.product.update({
+            where: { id: data.productId },
+            data: { imageUrls: urls as any },
+          });
+        } catch (e: any) {
+          return { productId: data.productId, count: urls.length, error: e?.message };
+        }
+        await writeAudit('PRODUCT_MEDIA_SYNC', 'Product', data.productId, {
+          count: urls.length,
+          via: 'queue',
+        });
+        return { productId: data.productId, count: urls.length };
       },
     });
   } catch (e: any) {
