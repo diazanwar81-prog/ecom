@@ -158,6 +158,16 @@ import {
   dailyPublishCap,
 } from '../../../packages/autonomy/src/index';
 
+import {
+  PHASE_A_META,
+  buildPhaseAChecks,
+  summarizePhaseA,
+} from '../../../packages/phase-a/src/index';
+import {
+  ensureShopifyAccessToken,
+} from '../../../packages/shopify/src/index';
+
+
 
 
 
@@ -455,6 +465,7 @@ function enrichProduct(p: any) {
     autoPublish: auto,
     priceChangesToday: p.priceChangesToday ?? 0,
     description: p.description,
+    imageUrls: Array.isArray(p.imageUrls) ? p.imageUrls : [],
   };
 }
 
@@ -609,7 +620,7 @@ class HealthController {
       service: 'ecom-api',
       mode: MODE,
       timestamp: new Date().toISOString(),
-      block: 75,
+      block: 81,
       aiRouter: true,
       orchestrator: true,
       agentRuns: true,
@@ -3727,6 +3738,95 @@ class CreativeController {
 }
 
 
+
+@Controller('phase-a')
+class PhaseAController {
+  @Get('meta')
+  meta() {
+    return { mode: process.env.ECOM_MODE || 'MOCK', ...PHASE_A_META };
+  }
+
+  @Get('verify')
+  async verify() {
+    const mode = process.env.ECOM_MODE || 'MOCK';
+    const shopify = getShopifyStatus();
+    const cj = getCjStatus();
+    const products = await prisma.product.findMany({
+      take: 300,
+      include: { suppliers: true },
+    });
+    const orders = await prisma.order.findMany({ take: 200 });
+    const publishedWithCj = products.filter(
+      (p) =>
+        p.status === 'PUBLISHED' &&
+        (p.suppliers || []).some((s: any) => s.cjVariantId || s.cjSku),
+    ).length;
+    const withDesc = products.filter((p) => p.description && String(p.description).length > 10).length;
+    const apiUrl = process.env.API_URL || process.env.APP_URL || '';
+
+    let tokenOk: boolean | undefined;
+    let tokenError: string | undefined;
+    try {
+      const tr = await ensureShopifyAccessToken();
+      tokenOk = tr.ok;
+      tokenError = tr.error;
+    } catch (e: any) {
+      tokenOk = false;
+      tokenError = e?.message || String(e);
+    }
+
+    const items = buildPhaseAChecks({
+      mode,
+      shopifyConfigured: shopify.configured,
+      tokenRefreshReady: Boolean((shopify as any).tokenRefreshReady),
+      tokenOk,
+      tokenError,
+      cjConfigured: Boolean(process.env.CJ_API_KEY && String(process.env.CJ_API_KEY).length > 5),
+      webhookSecret: String(process.env.SHOPIFY_WEBHOOK_SECRET || '').length > 3,
+      httpsPublic: /^https:\/\//i.test(apiUrl),
+      publishedWithCj,
+      productsWithDescription: withDesc,
+      productsTotal: products.length,
+      paidOrders: orders.filter((o) => o.status === 'PAID').length,
+      fulfilledOrders: orders.filter((o) => o.status === 'FULFILLED').length,
+      inventorySyncSupported: true,
+    });
+
+    const summary = summarizePhaseA(items);
+    const errors = items.filter((i) => !i.ok).map((i) => ({
+      id: i.id,
+      severity: i.severity,
+      message: i.message,
+      detail: i.detail,
+    }));
+
+    return {
+      mode,
+      block: 81,
+      phase: 'A',
+      ...summary,
+      errors,
+      panel: errors.length
+        ? { title: 'Errores / advertencias Fase A', items: errors }
+        : { title: 'Fase A OK', items: [] },
+      next: summary.ok
+        ? [
+            '1) go-live de 1 producto con stock > 0',
+            '2) Revisar inventario en Shopify > 0',
+            '3) Pedido de prueba → fulfill → tracking',
+          ]
+        : errors.filter((e) => e.severity === 'critical').map((e) => e.message),
+    };
+  }
+
+  @Post('token-refresh')
+  async tokenRefresh() {
+    const r = await ensureShopifyAccessToken();
+    return { mode: process.env.ECOM_MODE || 'MOCK', block: 77, ...r };
+  }
+}
+
+
 @Controller('autonomy')
 class AutonomyController {
   @Get('meta')
@@ -3916,7 +4016,7 @@ class AutonomyController {
 
 
 @Module({
-  controllers: [AutonomyController, CreativeController, ReleaseController, HardeningController, CatalogQualityController, RealCloseController, SeoController, AdsController, DeployController, TrendsController, MarketingController, AnalyticsController, ScoringController, ContentController, DashboardController, OpsController, 
+  controllers: [PhaseAController, AutonomyController, CreativeController, ReleaseController, HardeningController, CatalogQualityController, RealCloseController, SeoController, AdsController, DeployController, TrendsController, MarketingController, AnalyticsController, ScoringController, ContentController, DashboardController, OpsController, 
     HealthController,
     DiscoveryController,
     JobsController,
@@ -3996,7 +4096,7 @@ async function bootstrap() {
   const app = await NestFactory.create(AppModule);
   app.enableCors({ origin: process.env.APP_URL ?? 'http://localhost:3000' });
   await app.listen(Number(process.env.API_PORT ?? 4000));
-  console.log(`ECOM API block-75 (autonomy 67-75) on ${process.env.API_PORT ?? 4000} mode=${MODE}`);
+  console.log(`ECOM API block-81 (phase-A verify) on ${process.env.API_PORT ?? 4000} mode=${MODE}`);
 }
 
 void bootstrap();
