@@ -22,6 +22,7 @@ import {
   setInventoryLevel,
   getPrimaryLocationId,
 } from '../../../packages/shopify/src/index';
+import { uploadLocalFileToShopify } from '../../../packages/shopify/src/files';
 import { getCjStatus, fulfillOrder, searchCjProducts } from '../../../packages/cj/src/index';
 import {
   runProductPipeline,
@@ -639,7 +640,7 @@ class HealthController {
       service: 'ecom-api',
       mode: MODE,
       timestamp: new Date().toISOString(),
-      block: 92,
+      block: 93,
       aiRouter: true,
       orchestrator: true,
       agentRuns: true,
@@ -3762,6 +3763,103 @@ class CreativeController {
 
 @Controller('phase-c')
 class PhaseCController {
+
+  /**
+   * Render (optional) + upload MP4 to Shopify Files CDN.
+   * Body: { productId?, frames?, filePath?, role?, secondsPerFrame? }
+   */
+  @Post('upload-video')
+  async uploadVideo(
+    @Body()
+    body: {
+      productId?: string;
+      frames?: string[];
+      filePath?: string;
+      role?: string;
+      secondsPerFrame?: number;
+      filename?: string;
+    },
+  ) {
+    const panelItems: any[] = [];
+    let filePath = body?.filePath;
+    let render: any = null;
+
+    if (!filePath) {
+      let frames = (body?.frames || []).filter((u) => typeof u === 'string');
+      if (!frames.length && body?.productId) {
+        const p = await prisma.product.findUnique({
+          where: { id: body.productId },
+          include: { suppliers: { orderBy: { isPrimary: 'desc' }, take: 1 } },
+        });
+        if (!p) return { error: 'not_found' };
+        try {
+          frames = await resolveCjImageUrls(p.title, p.suppliers?.[0]?.cjSku);
+        } catch {
+          frames = [];
+        }
+      }
+      render = await renderSlideshowMp4({
+        frames,
+        secondsPerFrame: body?.secondsPerFrame ?? 3,
+        outName: `ecom-${body?.role || 'clip'}-${Date.now()}.mp4`,
+      });
+      if (render.status !== 'READY' || !render.filePath) {
+        if (render.status === 'SKIPPED_NO_FFMPEG') {
+          panelItems.push({
+            id: 'ffmpeg_missing',
+            severity: 'warning',
+            message: render.note || 'FFmpeg ausente',
+          });
+        } else {
+          panelItems.push({
+            id: 'render_failed',
+            severity: 'critical',
+            message: render.error || render.status,
+          });
+        }
+        return {
+          mode: process.env.ECOM_MODE || 'MOCK',
+          block: 93,
+          phase: 'C',
+          render,
+          upload: null,
+          panel: { title: 'Upload bloqueado', items: panelItems },
+        };
+      }
+      filePath = render.filePath;
+    }
+
+    const upload = await uploadLocalFileToShopify({
+      filePath,
+      filename: body?.filename || (render?.fileName as string) || undefined,
+      mimeType: 'video/mp4',
+      resource: 'FILE',
+    });
+
+    if (!upload.ok) {
+      panelItems.push({
+        id: 'shopify_upload_failed',
+        severity: 'critical',
+        message: upload.error || 'upload failed',
+        detail: 'Asegura scope write_files en la app Shopify y reautoriza el token',
+      });
+    }
+
+    return {
+      mode: process.env.ECOM_MODE || 'MOCK',
+      block: 93,
+      phase: 'C',
+      productId: body?.productId || null,
+      role: body?.role || 'ugc_hook',
+      render,
+      upload,
+      cdnUrl: upload.url || null,
+      panel: panelItems.length
+        ? { title: 'Upload con errores', items: panelItems }
+        : { title: 'Video en Shopify Files / CDN', items: [] },
+    };
+  }
+
   @Get('meta')
   meta() {
     return {
