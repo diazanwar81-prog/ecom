@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useMemo } from 'react';
 import { ApprovalsPanel } from '../components/ApprovalsPanel';
 
 type Product = {
@@ -20,6 +20,10 @@ type Product = {
   supplierName?: string;
   verified?: boolean;
   cjVariantId?: string | null;
+  cjSku?: string | null;
+  description?: string | null;
+  externalId?: string | null;
+  imageUrls?: string[] | null;
   autoPublish?: { ok: boolean; reason: string };
 };
 
@@ -51,6 +55,29 @@ type Approval = {
 
 const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000';
 
+/** Branding: quita prefijos de proveedor/mock y acorta para UI */
+function brandTitle(raw?: string | null): string {
+  if (!raw) return 'Sin título';
+  let t = raw
+    .replace(/^\[(SERPER\+CJ|SERPER|CJ|MOCK)\]\s*/i, '')
+    .replace(/^Cross-Border\s+(Dropshipping\s+)?/i, '')
+    .replace(/^Oem And Dropshipping\s+/i, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  // Prefer Spanish-style short if already mixed
+  if (t.length > 72) t = t.slice(0, 69).trim() + '…';
+  return t;
+}
+
+function money(n?: number | null, currency = 'COP') {
+  if (n == null || Number.isNaN(Number(n))) return '—';
+  try {
+    return Number(n).toLocaleString('es-CO') + ' ' + currency;
+  } catch {
+    return String(n) + ' ' + currency;
+  }
+}
+
 export default function Home() {
   const [mode, setMode] = useState('MOCK');
   const [block, setBlock] = useState<number | null>(null);
@@ -68,6 +95,7 @@ export default function Home() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
+  const [board, setBoard] = useState<any>(null);
 
   async function load() {
     setLoading(true);
@@ -77,7 +105,7 @@ export default function Home() {
         fetch(`${API}/health`).then((x) => x.json()),
         fetch(`${API}/products`).then((x) => x.json()),
         fetch(`${API}/approvals`).then((x) => x.json()),
-        fetch(`${API}/audit?limit=15`).then((x) => x.json()),
+        fetch(`${API}/audit?limit=20`).then((x) => x.json()),
         fetch(`${API}/rules`).then((x) => x.json()),
         fetch(`${API}/ai/status`).then((x) => x.json()),
         fetch(`${API}/agent-runs?limit=10`).then((x) => x.json()).catch(() => ({ items: [] })),
@@ -99,6 +127,8 @@ export default function Home() {
         setJobs(j.items || []);
         const o = await fetch(`${API}/orders`).then((x) => x.json()).catch(() => ({ items: [] }));
         setOrders(o.items || []);
+        const b = await fetch(`${API}/autonomy/board`).then((x) => x.json()).catch(() => null);
+        setBoard(b);
       } catch {
         setJobs([]);
       }
@@ -111,7 +141,47 @@ export default function Home() {
 
   useEffect(() => {
     load();
+    const t = setInterval(load, 45000);
+    return () => clearInterval(t);
   }, []);
+
+  const notifications = useMemo(() => {
+    const items: { id: string; level: 'info' | 'warn' | 'ok' | 'err'; text: string; at?: string }[] = [];
+    if (message) items.push({ id: 'msg', level: 'info', text: message });
+    const pending = approvals.filter((a) => a.status === 'PENDING');
+    if (pending.length) {
+      items.push({
+        id: 'appr',
+        level: 'warn',
+        text: `${pending.length} aprobación(es) pendiente(s)`,
+      });
+    }
+    const paid = orders.filter((o) => o.status === 'PAID');
+    if (paid.length) {
+      items.push({
+        id: 'paid',
+        level: 'warn',
+        text: `${paid.length} pedido(s) PAID por cumplir`,
+      });
+    }
+    const drafts = products.filter((p) => p.status === 'DRAFT');
+    if (drafts.length) {
+      items.push({
+        id: 'draft',
+        level: 'ok',
+        text: `${drafts.length} producto(s) DRAFT listos para go-live`,
+      });
+    }
+    for (const a of (audits || []).slice(0, 6)) {
+      items.push({
+        id: a.id,
+        level: 'info',
+        text: `${a.action} · ${a.entityType}${a.entityId ? ' · ' + String(a.entityId).slice(0, 8) : ''}`,
+        at: a.createdAt,
+      });
+    }
+    return items.slice(0, 12);
+  }, [message, approvals, orders, products, audits]);
 
   async function evaluate(id: string) {
     setMessage(null);
@@ -138,37 +208,17 @@ export default function Home() {
     const res = await fetch(`${API}/products/${id}/pipeline`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ skipAiCopy: true }),
+      body: JSON.stringify({ skipAiCopy: false }),
     });
     const data = await res.json();
     setMessage(`Pipeline: ${data.result?.status} · run ${data.agentRunId}`);
     await load();
   }
 
-function optimisticRemoveApproval(approvalId: string, productId?: string | null) {
-    setApprovals((prev) =>
-      prev.map((a) =>
-        a.id === approvalId ? { ...a, status: 'APPROVED' } : a,
-      ),
-    );
-    if (productId) {
-      setProducts((prev) =>
-        prev.map((p) =>
-          p.id === productId && p.status === 'PENDING_APPROVAL'
-            ? { ...p, status: 'PUBLISHED' }
-            : p,
-        ),
-      );
-    }
-  }
-
   async function decide(id: string, decision: 'APPROVED' | 'REJECTED') {
     setMessage(null);
     const current = approvals.find((a) => a.id === id);
-    // UI inmediata
-    setApprovals((prev) =>
-      prev.map((a) => (a.id === id ? { ...a, status: decision } : a)),
-    );
+    setApprovals((prev) => prev.map((a) => (a.id === id ? { ...a, status: decision } : a)));
     if (current?.productId) {
       setProducts((prev) =>
         prev.map((p) =>
@@ -240,18 +290,14 @@ function optimisticRemoveApproval(approvalId: string, productId?: string | null)
     await load();
   }
 
-  
   async function goLive(id: string) {
     setMessage(null);
-    // Quitar de pendientes al instante
     setApprovals((prev) =>
       prev.map((a) =>
         a.productId === id && a.status === 'PENDING' ? { ...a, status: 'APPROVED' } : a,
       ),
     );
-    setProducts((prev) =>
-      prev.map((p) => (p.id === id ? { ...p, status: 'PUBLISHED' } : p)),
-    );
+    setProducts((prev) => prev.map((p) => (p.id === id ? { ...p, status: 'PUBLISHED' } : p)));
     try {
       const res = await fetch(`${API}/products/${id}/go-live`, {
         method: 'POST',
@@ -264,7 +310,9 @@ function optimisticRemoveApproval(approvalId: string, productId?: string | null)
         await load();
         return;
       }
-      setMessage(`Go-live OK · shopify=${data.shopify?.externalId || data.product?.externalId} · mock=${data.mock}`);
+      setMessage(
+        `Go-live OK · shopify=${data.shopify?.externalId || data.product?.externalId} · mock=${data.mock}`,
+      );
     } catch (e: any) {
       setMessage(e?.message || 'Error de red');
     }
@@ -276,10 +324,12 @@ function optimisticRemoveApproval(approvalId: string, productId?: string | null)
     const res = await fetch(`${API}/products/${id}/publish`, { method: 'POST' });
     const data = await res.json();
     if (data.error) setMessage(`Publish: ${data.error} ${data.reason || ''}`);
-    else setMessage(`Publicado mock=${data.mock} id=${data.shopify?.externalId || data.product?.externalId}`);
+    else
+      setMessage(
+        `Publicado mock=${data.mock} id=${data.shopify?.externalId || data.product?.externalId}`,
+      );
     await load();
   }
-
 
   async function syncInventory(id: string) {
     setMessage(null);
@@ -316,9 +366,6 @@ function optimisticRemoveApproval(approvalId: string, productId?: string | null)
     await load();
   }
 
-  const pendingApprovals = approvals.filter((a) => a.status === 'PENDING');
-  const pendingProducts = products.filter((p) => p.status === 'PENDING_APPROVAL');
-
   const bandColor = (b?: string) => {
     if (b === 'IDEAL') return '#16a34a';
     if (b === 'OPERATIONAL') return '#2563eb';
@@ -327,39 +374,120 @@ function optimisticRemoveApproval(approvalId: string, productId?: string | null)
     return '#64748b';
   };
 
+  const levelBg = (l: string) => {
+    if (l === 'warn') return '#fef3c7';
+    if (l === 'ok') return '#dcfce7';
+    if (l === 'err') return '#fee2e2';
+    return '#e0f2fe';
+  };
+
   return (
-    <main style={{ fontFamily: 'system-ui, sans-serif', margin: '0 auto', maxWidth: 1120, padding: '1.5rem' }}>
-      <header style={{ marginBottom: '1.25rem' }}>
-        <p style={{ color: '#64748b', margin: 0 }}>ECOM · Panel operativo</p>
-        <h1 style={{ margin: '0.25rem 0' }}>Bloque {block ?? '—'} · Ops: aprobaciones · pedidos · publish</h1>
-        <p>
-          Modo: <strong style={{ color: mode === 'MOCK' ? '#ca8a04' : '#16a34a' }}>{mode}</strong>
+    <main
+      style={{
+        fontFamily: 'system-ui, sans-serif',
+        margin: '0 auto',
+        maxWidth: 1180,
+        padding: '1.25rem',
+        background: '#f8fafc',
+        minHeight: '100vh',
+      }}
+    >
+      <header style={{ marginBottom: '1rem' }}>
+        <p style={{ color: '#64748b', margin: 0, fontSize: 13 }}>ECOM · Panel operativo</p>
+        <h1 style={{ margin: '0.2rem 0', fontSize: '1.45rem' }}>
+          Bloque {block ?? '—'} · Branding + notificaciones
+        </h1>
+        <p style={{ margin: '0.35rem 0' }}>
+          Modo:{' '}
+          <strong style={{ color: mode === 'MOCK' ? '#ca8a04' : '#16a34a' }}>{mode}</strong>
           {' · '}
-          <button type="button" onClick={load} style={{ cursor: 'pointer' }}>Actualizar</button>
+          <button type="button" onClick={load} style={{ cursor: 'pointer' }}>
+            Actualizar
+          </button>
+          {loading && <span style={{ marginLeft: 8, color: '#64748b' }}>Cargando…</span>}
         </p>
-        {loading && <p>Cargando…</p>}
         {error && <p style={{ color: '#dc2626' }}>Error: {error}</p>}
-        {message && <p style={{ color: '#2563eb' }}>{message}</p>}
       </header>
 
+      {/* Notificaciones */}
+      <section
+        style={{
+          background: '#fff',
+          border: '1px solid #e2e8f0',
+          borderRadius: 10,
+          padding: '0.85rem 1rem',
+          marginBottom: '1.1rem',
+        }}
+      >
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <h2 style={{ margin: 0, fontSize: 16 }}>Notificaciones</h2>
+          <span style={{ fontSize: 12, color: '#64748b' }}>{notifications.length} recientes</span>
+        </div>
+        {notifications.length === 0 && (
+          <p style={{ fontSize: 13, color: '#94a3b8', margin: '0.5rem 0 0' }}>Sin eventos.</p>
+        )}
+        <ul style={{ listStyle: 'none', padding: 0, margin: '0.6rem 0 0', display: 'grid', gap: 6 }}>
+          {notifications.map((n) => (
+            <li
+              key={n.id}
+              style={{
+                background: levelBg(n.level),
+                borderRadius: 6,
+                padding: '6px 10px',
+                fontSize: 13,
+              }}
+            >
+              {n.text}
+              {n.at && (
+                <span style={{ color: '#64748b', marginLeft: 8, fontSize: 11 }}>
+                  {String(n.at).slice(0, 19).replace('T', ' ')}
+                </span>
+              )}
+            </li>
+          ))}
+        </ul>
+      </section>
+
+      {board && (
+        <section
+          style={{
+            background: '#f0fdf4',
+            border: '1px solid #bbf7d0',
+            borderRadius: 8,
+            padding: '0.75rem 1rem',
+            marginBottom: '1rem',
+            fontSize: 13,
+          }}
+        >
+          <strong>Autonomía</strong> score {board.score ?? '—'} · publicados con CJ:{' '}
+          {board.items?.find((i: any) => i.id === 'catalog_cj')?.message || '—'}
+        </section>
+      )}
+
       {discoveryStatus && (
-        <section style={{ background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 8, padding: '1rem', marginBottom: '1.25rem' }}>
-          <h2 style={{ marginTop: 0 }}>Descubrimiento</h2>
-          <p style={{ fontSize: 14 }}>{discoveryStatus.note}</p>
-          <p style={{ fontSize: 13, color: '#475569' }}>
-            MOCK: {discoveryStatus.sources?.mockCatalog ? 'sí' : 'no'} · Serper:{' '}
-            {discoveryStatus.sources?.serper ? 'sí' : 'no'} · CJ catalog:{' '}
-            {discoveryStatus.sources?.cjCatalog ? 'sí' : 'no'}
-          </p>
-          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
-            <button type="button" onClick={runDiscovery} style={{ cursor: 'pointer' }}>Discovery ahora</button>
-            <button type="button" onClick={enqueueDiscovery} style={{ cursor: 'pointer' }}>Encolar discovery (BullMQ)</button>
+        <section
+          style={{
+            background: '#f0fdf4',
+            border: '1px solid #bbf7d0',
+            borderRadius: 8,
+            padding: '1rem',
+            marginBottom: '1.1rem',
+          }}
+        >
+          <h2 style={{ marginTop: 0, fontSize: 16 }}>Descubrimiento</h2>
+          <p style={{ fontSize: 13, margin: '0 0 8px' }}>{discoveryStatus.note}</p>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 10 }}>
+            <button type="button" onClick={runDiscovery} style={{ cursor: 'pointer' }}>
+              Discovery ahora
+            </button>
+            <button type="button" onClick={enqueueDiscovery} style={{ cursor: 'pointer' }}>
+              Encolar discovery
+            </button>
           </div>
-          <h3 style={{ fontSize: 15 }}>Preview candidatos</h3>
-          <ul style={{ fontSize: 13, margin: 0 }}>
+          <ul style={{ fontSize: 12, margin: 0, paddingLeft: '1.1rem' }}>
             {preview.map((c: any) => (
               <li key={c.title}>
-                {c.title} · score {c.opportunityScore} · filtros{' '}
+                {brandTitle(c.title)} · score {c.opportunityScore} ·{' '}
                 {c.hardFilters?.ok ? 'OK' : (c.hardFilters?.reasons || []).join(', ')}
               </li>
             ))}
@@ -368,106 +496,254 @@ function optimisticRemoveApproval(approvalId: string, productId?: string | null)
       )}
 
       {aiStatus && (
-        <section style={{ background: '#f0f9ff', border: '1px solid #bae6fd', borderRadius: 8, padding: '1rem', marginBottom: '1.25rem' }}>
-          <h2 style={{ marginTop: 0 }}>AI Router</h2>
-          <p style={{ fontSize: 14 }}>Presupuesto auto: ${aiStatus.budgetUsdAutomatic} · Paid: {String(aiStatus.allowPaid)}</p>
+        <section
+          style={{
+            background: '#f0f9ff',
+            border: '1px solid #bae6fd',
+            borderRadius: 8,
+            padding: '0.85rem 1rem',
+            marginBottom: '1.1rem',
+          }}
+        >
+          <h2 style={{ marginTop: 0, fontSize: 16 }}>AI Router</h2>
+          <p style={{ fontSize: 13, margin: 0 }}>
+            Presupuesto auto: ${aiStatus.budgetUsdAutomatic} · Paid: {String(aiStatus.allowPaid)}
+          </p>
           {aiResult && (
-            <pre style={{ whiteSpace: 'pre-wrap', background: '#fff', padding: 10, borderRadius: 6, fontSize: 12 }}>{aiResult}</pre>
+            <pre
+              style={{
+                whiteSpace: 'pre-wrap',
+                background: '#fff',
+                padding: 10,
+                borderRadius: 6,
+                fontSize: 12,
+                marginTop: 8,
+              }}
+            >
+              {aiResult}
+            </pre>
           )}
         </section>
       )}
 
       {rules && (
-        <section style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 8, padding: '1rem', marginBottom: '1.25rem' }}>
-          <h2 style={{ marginTop: 0 }}>Reglas</h2>
-          <ul style={{ margin: 0, paddingLeft: '1.2rem', fontSize: 14 }}>
-            <li>Margen ideal ≥ {rules.rules?.MARGIN_IDEAL}% · mínimo ≥ {rules.rules?.MARGIN_MIN}%</li>
-            <li>Opportunity ≥ {rules.rules?.MIN_OPPORTUNITY_SCORE} · Auto-publish conf ≥ {rules.rules?.AUTO_PUBLISH_CONFIDENCE}%</li>
+        <section
+          style={{
+            background: '#fff',
+            border: '1px solid #e2e8f0',
+            borderRadius: 8,
+            padding: '0.85rem 1rem',
+            marginBottom: '1.1rem',
+          }}
+        >
+          <h2 style={{ marginTop: 0, fontSize: 16 }}>Reglas</h2>
+          <ul style={{ margin: 0, paddingLeft: '1.2rem', fontSize: 13 }}>
+            <li>
+              Margen ideal ≥ {rules.rules?.MARGIN_IDEAL}% · mínimo ≥ {rules.rules?.MARGIN_MIN}%
+            </li>
+            <li>
+              Opportunity ≥ {rules.rules?.MIN_OPPORTUNITY_SCORE} · Auto-publish conf ≥{' '}
+              {rules.rules?.AUTO_PUBLISH_CONFIDENCE}%
+            </li>
           </ul>
         </section>
       )}
 
-      <section style={{ marginBottom: '1.75rem' }}>
-        <h2>Productos ({products.length})</h2>
-        <div style={{ display: 'grid', gap: '0.85rem' }}>
-          {products.map((p) => (
-            <article
-              key={p.id}
-              style={{
-                border: '1px solid #e2e8f0',
-                borderRadius: 8,
-                padding: '0.85rem',
-                background: p.sourceMode === 'MOCK' ? '#fffbeb' : '#fff',
-              }}
-            >
-              <div style={{ display: 'flex', justifyContent: 'space-between', gap: '1rem', flexWrap: 'wrap' }}>
+      <section style={{ marginBottom: '1.5rem' }}>
+        <h2 style={{ fontSize: 17 }}>Productos ({products.length})</h2>
+        <p style={{ fontSize: 12, color: '#64748b', marginTop: -6 }}>
+          Título de branding (sin prefijo CJ/MOCK). Descripción y media cuando existan en API.
+        </p>
+        <div style={{ display: 'grid', gap: '0.9rem' }}>
+          {products.map((p) => {
+            const title = brandTitle(p.title);
+            const imgs = (p.imageUrls || []).filter(Boolean).slice(0, 4);
+            return (
+              <article
+                key={p.id}
+                style={{
+                  border: '1px solid #e2e8f0',
+                  borderRadius: 10,
+                  padding: '0.9rem',
+                  background: p.status === 'PUBLISHED' ? '#f0fdf4' : '#fff',
+                  display: 'grid',
+                  gridTemplateColumns: imgs.length ? '96px 1fr' : '1fr',
+                  gap: 12,
+                }}
+              >
+                {imgs.length > 0 && (
+                  <div style={{ display: 'grid', gap: 4 }}>
+                    {imgs.map((src, i) => (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img
+                        key={i}
+                        src={src}
+                        alt=""
+                        style={{
+                          width: 96,
+                          height: i === 0 ? 96 : 44,
+                          objectFit: 'cover',
+                          borderRadius: 6,
+                          background: '#f1f5f9',
+                        }}
+                      />
+                    ))}
+                  </div>
+                )}
                 <div>
-                  <strong>{p.title}</strong>
-                  <div style={{ fontSize: 12, color: '#64748b' }}>
-                    {p.status} · {p.sourceMode} · {p.supplierName}
-                    {p.cjVariantId ? ` · CJ ${p.cjVariantId}` : ''}
+                  <div
+                    style={{
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      gap: '0.75rem',
+                      flexWrap: 'wrap',
+                    }}
+                  >
+                    <div>
+                      <strong style={{ fontSize: 15 }}>{title}</strong>
+                      <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 2 }}>
+                        {p.status}
+                        {p.externalId ? ` · Shopify ${p.externalId}` : ''}
+                        {p.cjSku ? ` · SKU ${p.cjSku}` : ''}
+                        {p.supplierName ? ` · ${p.supplierName}` : ''}
+                      </div>
+                    </div>
+                    <div
+                      style={{
+                        textAlign: 'right',
+                        color: bandColor(p.marginBand),
+                        fontWeight: 700,
+                        fontSize: 14,
+                      }}
+                    >
+                      {p.marginPercent ?? '—'}% {p.marginBand}
+                    </div>
+                  </div>
+
+                  {p.description ? (
+                    <p
+                      style={{
+                        fontSize: 13,
+                        color: '#334155',
+                        margin: '0.45rem 0',
+                        lineHeight: 1.4,
+                      }}
+                    >
+                      {String(p.description).slice(0, 220)}
+                      {String(p.description).length > 220 ? '…' : ''}
+                    </p>
+                  ) : (
+                    <p style={{ fontSize: 12, color: '#94a3b8', margin: '0.4rem 0' }}>
+                      Sin descripción IA aún — usa «Copy IA» o Pipeline.
+                    </p>
+                  )}
+
+                  <p style={{ fontSize: 13, margin: '0.35rem 0 0.55rem' }}>
+                    <strong>{money(p.salePrice, p.currency || 'COP')}</strong>
+                    {' · '}score {p.opportunityScore ?? '—'} · conf {p.confidence ?? '—'}% · stock{' '}
+                    {p.stock ?? '—'}
+                  </p>
+
+                  <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                    <button type="button" onClick={() => evaluate(p.id)} style={{ cursor: 'pointer' }}>
+                      Evaluar
+                    </button>
+                    <button type="button" onClick={() => runPipeline(p.id)} style={{ cursor: 'pointer' }}>
+                      Pipeline
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => requestApproval(p.id)}
+                      style={{ cursor: 'pointer' }}
+                    >
+                      Pedir aprobación
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => generateCopy(p.id)}
+                      style={{ cursor: 'pointer' }}
+                    >
+                      Copy IA
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => goLive(p.id)}
+                      style={{
+                        cursor: 'pointer',
+                        background: '#16a34a',
+                        color: '#fff',
+                        border: 'none',
+                        borderRadius: 4,
+                        padding: '4px 10px',
+                      }}
+                    >
+                      Go-live
+                    </button>
+                    <button type="button" onClick={() => publish(p.id)} style={{ cursor: 'pointer' }}>
+                      Publicar
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => syncInventory(p.id)}
+                      style={{ cursor: 'pointer' }}
+                    >
+                      Sync stock
+                    </button>
                   </div>
                 </div>
-                <div style={{ textAlign: 'right', color: bandColor(p.marginBand), fontWeight: 600 }}>
-                  {p.marginPercent ?? '—'}% {p.marginBand}
-                </div>
-              </div>
-              <p style={{ fontSize: 13, margin: '0.5rem 0' }}>
-                {p.salePrice?.toLocaleString?.('es-CO')} {p.currency} · score {p.opportunityScore} · conf{' '}
-                {p.confidence}% · stock {p.stock}
-              </p>
-              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                <button type="button" onClick={() => evaluate(p.id)} style={{ cursor: 'pointer' }}>Evaluar</button>
-                <button type="button" onClick={() => runPipeline(p.id)} style={{ cursor: 'pointer' }}>Pipeline</button>
-                <button type="button" onClick={() => requestApproval(p.id)} style={{ cursor: 'pointer' }}>Pedir aprobación</button>
-                <button type="button" onClick={() => generateCopy(p.id)} style={{ cursor: 'pointer' }}>Copy IA</button>
-                <button type="button" onClick={() => goLive(p.id)} style={{ cursor: 'pointer', background: '#16a34a', color: '#fff', border: 'none', borderRadius: 4, padding: '4px 8px' }}>Go-live</button>
-                <button type="button" onClick={() => publish(p.id)} style={{ cursor: 'pointer' }}>Publicar</button>
-                <button type="button" onClick={() => syncInventory(p.id)} style={{ cursor: 'pointer' }}>Sync stock</button>
-              </div>
-            </article>
-          ))}
+              </article>
+            );
+          })}
         </div>
       </section>
 
-      <section style={{ marginBottom: '1.75rem' }}>
-        <h2>Pedidos ({orders.length})</h2>
+      <section style={{ marginBottom: '1.5rem' }}>
+        <h2 style={{ fontSize: 17 }}>Pedidos ({orders.length})</h2>
         {orders.length === 0 && <p style={{ color: '#64748b' }}>Sin pedidos.</p>}
         <div style={{ display: 'grid', gap: 8 }}>
           {orders.map((o) => (
-            <div key={o.id} style={{ border: '1px solid #e2e8f0', borderRadius: 8, padding: 10 }}>
+            <div
+              key={o.id}
+              style={{ border: '1px solid #e2e8f0', borderRadius: 8, padding: 10, background: '#fff' }}
+            >
               <strong>{o.orderNumber || o.id}</strong> · {o.status} · {o.total} {o.currency}
               <div style={{ fontSize: 12, color: '#64748b' }}>
                 {o.email || 'sin email'} · {o.fulfillmentNote || ''}
               </div>
               <div style={{ marginTop: 6, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                 {o.status !== 'FULFILLED' && (
-                  <button type="button" onClick={() => fulfillOrder(o.id)} style={{ cursor: 'pointer' }}>Fulfill CJ</button>
+                  <button type="button" onClick={() => fulfillOrder(o.id)} style={{ cursor: 'pointer' }}>
+                    Fulfill CJ
+                  </button>
                 )}
-                <button type="button" onClick={() => syncTracking(o.id)} style={{ cursor: 'pointer' }}>Sync tracking Shopify</button>
+                <button type="button" onClick={() => syncTracking(o.id)} style={{ cursor: 'pointer' }}>
+                  Sync tracking Shopify
+                </button>
               </div>
             </div>
           ))}
         </div>
       </section>
 
-            <ApprovalsPanel />
+      <ApprovalsPanel />
 
-
-      <section style={{ marginBottom: '1.75rem' }}>
-        <h2>Agent runs</h2>
+      <section style={{ marginBottom: '1.5rem' }}>
+        <h2 style={{ fontSize: 16 }}>Agent runs</h2>
         <ul style={{ fontSize: 12, color: '#475569' }}>
           {agentRuns.map((r) => (
             <li key={r.id}>
-              {r.createdAt} · {r.productTitle} · <strong>{r.status}</strong> · margen {r.marginPercent}%
+              {r.createdAt} · {brandTitle(r.productTitle)} · <strong>{r.status}</strong> · margen{' '}
+              {r.marginPercent}%
             </li>
           ))}
         </ul>
       </section>
 
-      <section style={{ marginBottom: '1.75rem' }}>
-        <h2>Jobs (cola)</h2>
-        {jobs.length === 0 && <p style={{ color: '#64748b', fontSize: 13 }}>Sin jobs recientes o endpoint /jobs no disponible aún.</p>}
+      <section style={{ marginBottom: '1.5rem' }}>
+        <h2 style={{ fontSize: 16 }}>Jobs (cola)</h2>
+        {jobs.length === 0 && (
+          <p style={{ color: '#64748b', fontSize: 13 }}>Sin jobs recientes.</p>
+        )}
         <ul style={{ fontSize: 12 }}>
           {jobs.map((j) => (
             <li key={String(j.id)}>
@@ -478,7 +754,7 @@ function optimisticRemoveApproval(approvalId: string, productId?: string | null)
       </section>
 
       <section>
-        <h2>Auditoría</h2>
+        <h2 style={{ fontSize: 16 }}>Auditoría</h2>
         <ul style={{ fontSize: 12, color: '#475569' }}>
           {audits.map((x) => (
             <li key={x.id}>
@@ -489,7 +765,7 @@ function optimisticRemoveApproval(approvalId: string, productId?: string | null)
       </section>
 
       <footer style={{ marginTop: '2rem', fontSize: 12, color: '#94a3b8' }}>
-        Discovery MOCK/Serper · Orchestrator · AgentRun · BullMQ · Shopify/CJ live-ready. Presupuesto auto $0. · Panel block 26 (orders/inventory).
+        Panel block 76 · notificaciones · branding de títulos · media si API envía imageUrls.
       </footer>
     </main>
   );
