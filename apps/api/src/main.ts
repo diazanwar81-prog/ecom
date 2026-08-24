@@ -1318,28 +1318,66 @@ class AiController {
 
 
 async function resolveCjImageUrls(title: string, sku?: string | null): Promise<string[]> {
+  const urls: string[] = [];
+  const push = (u: unknown) => {
+    const s = String(u || '').trim();
+    if (s && /^https?:\/\//i.test(s) && !urls.includes(s)) urls.push(s);
+  };
   try {
-    const cleaned = String(title || '')
-      .replace(/\[(?:MOCK|SERPER\+CJ|SERPER|CJ)\]\s*/gi, '')
-      .replace(/Cross-Border|Dropshipping|Fashion|Elegant|Light|Luxury/gi, ' ')
-      .replace(/[^a-zA-Z0-9\s]/g, ' ')
-      .split(/\s+/)
-      .filter((w) => w.length > 3)
-      .slice(0, 5)
-      .join(' ')
-      .trim();
-    const keyword = cleaned || 'necklace';
-    const found = await searchCjProducts({ keyword, pageSize: 5 });
-    if (!found.ok || !found.items?.length) return [];
-    const urls: string[] = [];
-    for (const item of found.items) {
-      const u = (item as any).productImage || (item as any).productImageEn || (item as any).bigImage;
-      if (u && /^https?:\/\//i.test(String(u))) urls.push(String(u));
+    // A) by SKU string search
+    if (sku && String(sku).trim()) {
+      try {
+        const bySku = await searchCjProducts({ keyword: String(sku).trim(), pageSize: 5 });
+        if (bySku.ok && bySku.items?.length) {
+          for (const item of bySku.items as any[]) {
+            push(item.productImage);
+            push(item.productImageEn);
+            push(item.bigImage);
+            const list = item.productImageList || item.imageList || item.productImgList;
+            if (Array.isArray(list)) list.slice(0, 8).forEach(push);
+          }
+        }
+      } catch {}
     }
-    return urls.slice(0, 3);
+    // B) keyword from cleaned title
+    if (urls.length < 1) {
+      const cleaned = String(title || '')
+        .replace(/\[(?:MOCK|SERPER\+CJ|SERPER|CJ)\]\s*/gi, '')
+        .replace(/Cross-Border|Dropshipping/gi, ' ')
+        .replace(/[^a-zA-Z0-9\u00C0-\u024F\s]/g, ' ')
+        .split(/\s+/)
+        .filter((w) => w.length > 3)
+        .slice(0, 6)
+        .join(' ')
+        .trim();
+      if (cleaned) {
+        try {
+          const found = await searchCjProducts({ keyword: cleaned, pageSize: 8 });
+          if (found.ok && found.items?.length) {
+            for (const item of found.items as any[]) {
+              push(item.productImage);
+              push(item.productImageEn);
+              push(item.bigImage);
+            }
+          }
+        } catch {}
+      }
+    }
+    // C) matchCjByKeyword helper if present
+    if (urls.length < 1 && typeof (matchCjByKeyword as any) === 'function') {
+      try {
+        const kw = String(sku || title || '').slice(0, 40);
+        const m = await (matchCjByKeyword as any)(kw);
+        if (m?.product) {
+          push(m.product.productImage);
+          push(m.product.productImageEn);
+        }
+      } catch {}
+    }
   } catch {
-    return [];
+    /* ignore */
   }
+  return urls.slice(0, 6);
 }
 
 function cleanProductTitle(raw: string): string {
