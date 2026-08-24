@@ -350,6 +350,15 @@ export default function Home() {
     await load();
   }
 
+  async function syncMedia(id: string) {
+    setMessage(null);
+    const res = await fetch(`${API}/products/${id}/sync-media`, { method: 'POST' });
+    const data = await res.json();
+    if (data.error) setMessage(`Media: ${data.error}`);
+    else setMessage(`Media OK · ${data.count || 0} imagen(es)`);
+    await load();
+  }
+
   async function syncInventory(id: string) {
     setMessage(null);
     const res = await fetch(`${API}/products/${id}/sync-inventory`, {
@@ -1090,6 +1099,13 @@ export default function Home() {
                     </button>
                     <button type="button" onClick={() => publish(p.id)} style={{ cursor: 'pointer' }}>
                       Publicar
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => syncMedia(p.id)}
+                      style={{ cursor: 'pointer' }}
+                    >
+                      Sync media
                     </button>
                     <button
                       type="button"

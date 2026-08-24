@@ -1779,6 +1779,44 @@ class ProductsController {
     };
   }
 
+  @Post(':id/sync-media')
+  async syncMedia(@Param('id') id: string) {
+    const p = await prisma.product.findUnique({
+      where: { id },
+      include: { suppliers: { orderBy: { isPrimary: 'desc' } } },
+    });
+    if (!p) return { error: 'not_found' };
+    const primary = p.suppliers && p.suppliers[0];
+    const urls = await resolveCjImageUrls(p.title, primary ? primary.cjSku : null);
+    let updated = p;
+    try {
+      updated = await prisma.product.update({
+        where: { id },
+        data: { imageUrls: urls as any },
+      });
+    } catch (e: any) {
+      // schema without imageUrls yet — still return urls
+      return {
+        mode: MODE,
+        productId: id,
+        imageUrls: urls,
+        count: urls.length,
+        warning: 'imageUrls column missing or update failed: ' + String(e && e.message),
+      };
+    }
+    await writeAudit('PRODUCT_MEDIA_SYNC', 'Product', id, {
+      count: urls.length,
+      sku: primary ? primary.cjSku : null,
+    });
+    return {
+      mode: MODE,
+      productId: id,
+      imageUrls: urls,
+      count: urls.length,
+      product: enrichProduct({ ...p, ...updated, imageUrls: urls }),
+    };
+  }
+
   @Post(':id/generate-copy')
   async generateCopy(
     @Param('id') id: string,
