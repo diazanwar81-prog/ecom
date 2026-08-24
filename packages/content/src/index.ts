@@ -1,7 +1,8 @@
 /**
  * ECOM Content
  * - Block 29: landing HTML
- * - Block 61: creative product brief (copy llamativo por nicho)
+ * - Block 61: creative product brief
+ * - Block 62-ready: media plan with prompt_gen (EN), aspectRatio, negativePrompt
  */
 
 import { complete, type AiResponse } from '../../ai-router/src/index';
@@ -95,9 +96,29 @@ export type CreativeBriefInput = {
   forceMock?: boolean;
 };
 
+export type MediaImageSpec = {
+  role: string;
+  /** Human-readable brief in Spanish */
+  prompt: string;
+  /** Technical prompt for image models (English preferred) */
+  promptGen: string;
+  aspectRatio: '1:1' | '4:5' | '9:16' | '16:9';
+  negativePrompt: string;
+};
+
+export type MediaVideoSpec = {
+  role: string;
+  prompt: string;
+  promptGen: string;
+  aspectRatio: '9:16' | '1:1';
+  durationHintSec: number;
+  negativePrompt: string;
+};
+
 export type MediaPlan = {
-  images: { role: string; prompt: string }[];
-  videos: { role: string; prompt: string; durationHintSec: number }[];
+  images: MediaImageSpec[];
+  videos: MediaVideoSpec[];
+  productSubjectEn: string;
 };
 
 export type CreativeBrief = {
@@ -143,7 +164,15 @@ export function detectNiche(rawTitle: string, category?: string): string {
 
 const NICHE_VOICE: Record<
   string,
-  { tone: string; titleHints: string[]; bulletSeeds: string[]; cta: string; nameExamples: string[] }
+  {
+    tone: string;
+    titleHints: string[];
+    bulletSeeds: string[];
+    cta: string;
+    nameExamples: string[];
+    subjectHintEn: string;
+    lifestyleContextEn: string;
+  }
 > = {
   joyeria: {
     tone: 'elegante, aspiracional, regalo',
@@ -156,6 +185,9 @@ const NICHE_VOICE: Record<
     ],
     cta: 'Completa tu look hoy',
     nameExamples: ['Collar clavícula brillante', 'Set aretes y cadena', 'Collar de capas liviano'],
+    subjectHintEn: 'delicate fashion jewelry piece, refined metal finish, commercial product detail',
+    lifestyleContextEn:
+      'young Latin American woman, casual elegant outfit, natural window light, necklace or jewelry clearly visible on collarbone',
   },
   hogar: {
     tone: 'practico, orden, alivio',
@@ -168,6 +200,8 @@ const NICHE_VOICE: Record<
     ],
     cta: 'Ordena tu espacio hoy',
     nameExamples: ['Organizador plegable', 'Caja de cables escritorio', 'Soporte multiproposito'],
+    subjectHintEn: 'practical home organizer product, clean design, everyday household use',
+    lifestyleContextEn: 'tidy modern home desk or kitchen counter, product in real use, bright daylight',
   },
   belleza: {
     tone: 'cuidado, ritual, confianza',
@@ -180,6 +214,8 @@ const NICHE_VOICE: Record<
     ],
     cta: 'Empieza tu ritual',
     nameExamples: ['Serum facial diario', 'Kit de cuidado basico', 'Brocha de maquillaje'],
+    subjectHintEn: 'beauty care product packaging, clean cosmetic still life',
+    lifestyleContextEn: 'bathroom vanity, soft morning light, skincare routine moment',
   },
   tech: {
     tone: 'util, moderno, sin friccion',
@@ -192,6 +228,8 @@ const NICHE_VOICE: Record<
     ],
     cta: 'Haz tu dia mas facil',
     nameExamples: ['Soporte magnetico celular', 'Lampara LED portatil', 'Cargador compacto'],
+    subjectHintEn: 'compact consumer tech gadget, modern minimal design',
+    lifestyleContextEn: 'desk or car interior, person using the gadget naturally',
   },
   fitness: {
     tone: 'energia, constancia',
@@ -204,6 +242,8 @@ const NICHE_VOICE: Record<
     ],
     cta: 'Suma a tu rutina',
     nameExamples: ['Botella termica 1L', 'Banda de resistencia', 'Toalla deportiva'],
+    subjectHintEn: 'sport fitness accessory, durable materials, active lifestyle product',
+    lifestyleContextEn: 'gym or outdoor workout, athlete using the product',
   },
   moda: {
     tone: 'estilo, tendencia, confianza',
@@ -216,6 +256,8 @@ const NICHE_VOICE: Record<
     ],
     cta: 'Renueva tu look',
     nameExamples: ['Chaqueta con flecos', 'Blusa de impacto', 'Accesorio de moda'],
+    subjectHintEn: 'fashion apparel or accessory, on-trend design, fabric texture visible',
+    lifestyleContextEn: 'street style or mirror selfie, full or half body, product as hero of the look',
   },
   general: {
     tone: 'beneficio claro, compra segura',
@@ -228,8 +270,150 @@ const NICHE_VOICE: Record<
     ],
     cta: 'Llevalo a casa',
     nameExamples: ['Producto destacado', 'Esencial diario', 'Pieza practica'],
+    subjectHintEn: 'consumer product, clean commercial photography subject',
+    lifestyleContextEn: 'everyday realistic setting, product in natural use',
   },
 };
+
+const GLOBAL_NEG =
+  'watermark, logo, brand name, blurry, low quality, jpeg artifacts, oversaturated, ' +
+  'deformed, extra limbs, bad hands, mutated fingers, text overlay, subtitles, ' +
+  'busy background, clutter, stock photo watermark, frame, border';
+
+const HERO_NEG =
+  GLOBAL_NEG + ', model, person, hands holding product, mannequin, price tag, packaging text unreadable';
+
+const LIFESTYLE_NEG =
+  GLOBAL_NEG + ', deformed face, uncanny, extra fingers, wrong product, different jewelry, celebrity lookalike';
+
+const DETAIL_NEG = GLOBAL_NEG + ', full body, distant shot, text, diagram labels';
+
+const INFO_NEG =
+  GLOBAL_NEG + ', unreadable text, random letters, medical claims, before-after skin, body distortion';
+
+/** Map Spanish commercial name → short English subject for image models */
+export function productSubjectEn(productName: string, niche: string): string {
+  const n = (productName || '').toLowerCase();
+  const voice = NICHE_VOICE[niche] || NICHE_VOICE.general;
+
+  if (/collar|clav[ií]cula|cadena|arete|joya/.test(n)) {
+    if (/capa|layer/.test(n)) return 'delicate multi-layer collarbone chain necklace, fine links, soft metallic shine';
+    if (/arete/.test(n)) return 'elegant pair of fashion earrings, refined finish';
+    return 'delicate collarbone necklace, fine chain, commercial jewelry product';
+  }
+  if (/organiz/.test(n)) return 'foldable storage organizer, practical home product';
+  if (/soporte|celular|magnet/.test(n)) return 'magnetic phone car mount or desk holder, compact tech accessory';
+  if (/botella|t[eé]rmica/.test(n)) return 'insulated sports water bottle, 1L, matte finish';
+  if (/chaqueta|fleco/.test(n)) return 'fashion jacket with fringe detail, apparel product';
+  if (/l[aá]mpara|led/.test(n)) return 'portable LED lamp, modern minimal design';
+
+  // fallback: keep name + niche hint
+  return `${productName}, ${voice.subjectHintEn}`;
+}
+
+export function defaultMediaPlan(productName: string, niche = 'general'): MediaPlan {
+  const n = (productName || 'product').slice(0, 60);
+  const voice = NICHE_VOICE[niche] || NICHE_VOICE.general;
+  const subject = productSubjectEn(n, niche);
+
+  const images: MediaImageSpec[] = [
+    {
+      role: 'hero_main',
+      prompt: `Foto de producto profesional e-commerce de ${n}, fondo limpio blanco o neutro, iluminacion de estudio suave, centrado, alta nitidez, estilo ${niche}`,
+      promptGen: [
+        `Professional e-commerce product photo of ${subject}`,
+        'centered on pure seamless white background',
+        'soft studio softbox lighting, sharp focus, high detail',
+        'commercial catalog style, Shopify main image',
+        'no model, no hands, no props, single product only',
+        '1:1 square composition',
+      ].join(', '),
+      aspectRatio: '1:1',
+      negativePrompt: HERO_NEG,
+    },
+    {
+      role: 'lifestyle',
+      prompt: `Persona real usando ${n} en contexto cotidiano, tono ${voice.tone}, luz natural, estilo UGC premium, sin logos inventados`,
+      promptGen: [
+        `Lifestyle photo: ${voice.lifestyleContextEn}`,
+        `featuring ${subject} as the clear hero accessory/product`,
+        'natural window light, shallow depth of field, authentic UGC premium aesthetic',
+        'realistic skin, candid pose, Colombia-friendly look',
+        '4:5 portrait framing for Instagram/Shopify',
+      ].join(', '),
+      aspectRatio: '4:5',
+      negativePrompt: LIFESTYLE_NEG,
+    },
+    {
+      role: 'detail_closeup',
+      prompt: `Primer plano de textura y detalles de ${n}, macro, nitidez alta, sin texto superpuesto`,
+      promptGen: [
+        `Extreme close-up macro of ${subject}`,
+        'texture and material detail, sharp focus, commercial product photography',
+        'neutral soft background, no text, no labels',
+        '1:1 square',
+      ].join(', '),
+      aspectRatio: '1:1',
+      negativePrompt: DETAIL_NEG,
+    },
+    {
+      role: 'packshot_angle',
+      prompt: `Angulo alterno de ${n} sobre superficie neutra, sombra suave realista`,
+      promptGen: [
+        `Three-quarter angle packshot of ${subject}`,
+        'on neutral seamless surface, soft realistic contact shadow',
+        'studio lighting, catalog consistency with hero shot',
+        'no model, no hands, 1:1 square',
+      ].join(', '),
+      aspectRatio: '1:1',
+      negativePrompt: HERO_NEG,
+    },
+    {
+      role: 'infographic',
+      prompt: `Infografia simple de beneficios de ${n}, iconos limpios, texto en espanol, fondo blanco, sin promesas medicas`,
+      promptGen: [
+        `Clean e-commerce infographic layout for ${subject}`,
+        'white background, simple flat icons only (no body, no medical imagery)',
+        'minimal Spanish benefit labels as short words if any text, high contrast',
+        'modern product benefit sheet, 1:1',
+        'prefer icons over paragraphs of text',
+      ].join(', '),
+      aspectRatio: '1:1',
+      negativePrompt: INFO_NEG,
+    },
+  ];
+
+  const videos: MediaVideoSpec[] = [
+    {
+      role: 'ugc_hook',
+      prompt: `Video vertical 9:16 de ${n}, primeros 3 segundos con gancho visual, tono ${voice.tone}, subtitulos en espanol`,
+      promptGen: [
+        `Vertical 9:16 UGC-style video of ${subject}`,
+        'first 3 seconds strong visual hook, authentic handheld feel',
+        `tone: ${voice.tone}`,
+        'product clearly visible, optional Spanish captions burn-in later',
+      ].join(', '),
+      aspectRatio: '9:16',
+      durationHintSec: 15,
+      negativePrompt: LIFESTYLE_NEG + ', long static slideshow',
+    },
+    {
+      role: 'descriptive',
+      prompt: `Video descriptivo 9:16 de ${n}: muestra, uso y CTA "${voice.cta}", subtitulos en espanol`,
+      promptGen: [
+        `Vertical 9:16 product demo video of ${subject}`,
+        'show product, simple use moment, end on clear CTA energy',
+        `CTA idea: ${voice.cta}`,
+        'clean background, commercial but approachable',
+      ].join(', '),
+      aspectRatio: '9:16',
+      durationHintSec: 30,
+      negativePrompt: GLOBAL_NEG + ', unreadable captions, chaotic cuts',
+    },
+  ];
+
+  return { images, videos, productSubjectEn: subject };
+}
 
 const EN_LEAK =
   /\b(necklace|collarbone|earring|earrings|jewelry|jewellery|fashion|luxury|premium|style|elegant|outfit|cross-border|dropshipping|hot-selling|chain necklace|rhinestone|pendant|bracelet|ring set|high-end|accessories|lightweight|versatile)\b/i;
@@ -288,7 +472,6 @@ const HONEST_INFO = [
   'Sin afirmaciones médicas ni resultados garantizados',
 ];
 
-/** Solo líneas inventadas por el modelo (precio/stock/margen/políticas falsas) */
 function isBadImportantLine(s: string): boolean {
   const t = (s || '').trim();
   if (!t) return true;
@@ -368,47 +551,6 @@ export function polishBriefEs(
       tags,
     },
     mediaPlan: defaultMediaPlan(productName, brief.niche),
-  };
-}
-
-export function defaultMediaPlan(productName: string, niche = 'general'): MediaPlan {
-  const n = productName.slice(0, 60);
-  const voice = NICHE_VOICE[niche] || NICHE_VOICE.general;
-  return {
-    images: [
-      {
-        role: 'hero_main',
-        prompt: `Foto de producto profesional e-commerce de ${n}, fondo limpio blanco o neutro, iluminacion de estudio suave, centrado, alta nitidez, estilo ${niche}`,
-      },
-      {
-        role: 'lifestyle',
-        prompt: `Persona real usando ${n} en contexto cotidiano, tono ${voice.tone}, luz natural, estilo UGC premium, sin logos inventados`,
-      },
-      {
-        role: 'detail_closeup',
-        prompt: `Primer plano de textura y detalles de ${n}, macro, nitidez alta, sin texto superpuesto`,
-      },
-      {
-        role: 'packshot_angle',
-        prompt: `Angulo alterno de ${n} sobre superficie neutra, sombra suave realista`,
-      },
-      {
-        role: 'infographic',
-        prompt: `Infografia simple de beneficios de ${n}, iconos limpios, texto en espanol, fondo blanco, sin promesas medicas`,
-      },
-    ],
-    videos: [
-      {
-        role: 'ugc_hook',
-        prompt: `Video vertical 9:16 de ${n}, primeros 3 segundos con gancho visual, tono ${voice.tone}, subtitulos en espanol`,
-        durationHintSec: 15,
-      },
-      {
-        role: 'descriptive',
-        prompt: `Video descriptivo 9:16 de ${n}: muestra, uso y CTA "${voice.cta}", subtitulos en espanol`,
-        durationHintSec: 30,
-      },
-    ],
   };
 }
 
@@ -687,6 +829,8 @@ export function validateBrief(brief: CreativeBrief): {
   if (!brief.bullets || brief.bullets.length < 3) issues.push('bullets_lt_3');
   if (!brief.mediaPlan?.images || brief.mediaPlan.images.length < 5) issues.push('images_plan_lt_5');
   if (!brief.mediaPlan?.videos || brief.mediaPlan.videos.length < 2) issues.push('videos_plan_lt_2');
+  const img0 = brief.mediaPlan?.images?.[0] as MediaImageSpec | undefined;
+  if (img0 && !(img0 as any).promptGen) issues.push('missing_prompt_gen');
   if (isWeakProductName(brief.productName || '')) issues.push('generic_product_name');
   if (hasEnglishLeak(brief.description || '') || hasEnglishLeak(brief.productName || ''))
     issues.push('english_leak');
@@ -694,7 +838,13 @@ export function validateBrief(brief: CreativeBrief): {
   if (/calidad y practicidad/i.test(brief.description || '')) issues.push('generic_copy');
   const hard = issues.filter(
     (i) =>
-      !['generic_copy', 'english_leak', 'generic_product_name', 'bad_important_info'].includes(i),
+      ![
+        'generic_copy',
+        'english_leak',
+        'generic_product_name',
+        'bad_important_info',
+        'missing_prompt_gen',
+      ].includes(i),
   );
   return { ok: hard.length === 0, issues };
 }
@@ -707,10 +857,13 @@ export const CONTENT_META = {
     'niche_detection',
     'sales_copy',
     'media_plan_5img_2vid',
+    'prompt_gen_en',
+    'aspect_ratio',
+    'negative_prompt',
     'seo_basic',
     'quality_prompt_v2',
     'polish_es_postprocess',
     'honest_important_info',
   ],
-  note: 'importantInfo siempre plantilla honesta; validador no marca el disclaimer de garantizados.',
+  note: 'Media plan listo para bloque 62: prompt (ES) + promptGen (EN) + aspectRatio + negativePrompt.',
 };
