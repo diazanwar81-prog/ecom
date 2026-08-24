@@ -443,17 +443,7 @@ export default function Home() {
   async function activateRealMode() {
     if (realBusy) return;
     const ok = window.confirm(
-      'Activar modo REAL en este proceso?
-
-' +
-        '- Publicara/fulfill con credenciales live
-' +
-        '- No modifica el archivo .env
-' +
-        '- Reiniciar Docker puede volver a SANDBOX
-
-' +
-        'Confirma solo si completaste checklist HTTPS/webhooks/CJ/Shopify.',
+      'Activar modo REAL en este proceso? Publicara/fulfill live. No modifica .env. Reiniciar Docker puede volver a SANDBOX. Confirma solo con checklist HTTPS/webhooks/CJ/Shopify completo.',
     );
     if (!ok) return;
     setRealBusy(true);
