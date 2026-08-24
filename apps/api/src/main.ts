@@ -4724,8 +4724,6 @@ class AutonomyController {
 }
 
 
-@Module({
-  
 @Controller('v1')
 class V1FinalController {
   @Get('status')
@@ -4876,7 +4874,8 @@ class PublicLandingController {
   }
 }
 
-controllers: [V1FinalController, PublicLandingController, PhaseCController, PhaseBController, PhaseAController, AutonomyController, CreativeController, ReleaseController, HardeningController, CatalogQualityController, RealCloseController, SeoController, AdsController, DeployController, TrendsController, MarketingController, AnalyticsController, ScoringController, ContentController, DashboardController, OpsController, 
+@Module({
+  controllers: [V1FinalController, PublicLandingController, PhaseCController, PhaseBController, PhaseAController, AutonomyController, CreativeController, ReleaseController, HardeningController, CatalogQualityController, RealCloseController, SeoController, AdsController, DeployController, TrendsController, MarketingController, AnalyticsController, ScoringController, ContentController, DashboardController, OpsController, 
     HealthController,
     DiscoveryController,
     JobsController,
