@@ -23,6 +23,7 @@ import {
   getPrimaryLocationId,
 } from '../../../packages/shopify/src/index';
 import { uploadLocalFileToShopify } from '../../../packages/shopify/src/files';
+import { attachMediaToProduct } from '../../../packages/shopify/src/product-media';
 import { getCjStatus, fulfillOrder, searchCjProducts } from '../../../packages/cj/src/index';
 import {
   runProductPipeline,
@@ -640,7 +641,7 @@ class HealthController {
       service: 'ecom-api',
       mode: MODE,
       timestamp: new Date().toISOString(),
-      block: 93,
+      block: 94,
       aiRouter: true,
       orchestrator: true,
       agentRuns: true,
@@ -3763,6 +3764,183 @@ class CreativeController {
 
 @Controller('phase-c')
 class PhaseCController {
+
+  /**
+   * Full path: frames → MP4 → Shopify Files → attach to product media.
+   * Body: { productId, shopifyProductId?, frames?, role? }
+   * If shopifyProductId omitted, uses Product.externalId from DB.
+   */
+  @Post('attach-video')
+  async attachVideo(
+    @Body()
+    body: {
+      productId?: string;
+      shopifyProductId?: string;
+      frames?: string[];
+      role?: string;
+      secondsPerFrame?: number;
+      originalSource?: string;
+    },
+  ) {
+    const panelItems: any[] = [];
+    if (!body?.productId && !body?.shopifyProductId) {
+      return { error: 'productId_or_shopifyProductId_required' };
+    }
+
+    let shopifyProductId = body.shopifyProductId;
+    let frames = (body.frames || []).filter((u) => typeof u === 'string');
+    let title = 'ECOM';
+
+    if (body.productId) {
+      const p = await prisma.product.findUnique({
+        where: { id: body.productId },
+        include: { suppliers: { orderBy: { isPrimary: 'desc' }, take: 1 } },
+      });
+      if (!p) return { error: 'not_found' };
+      title = p.title;
+      if (!shopifyProductId) shopifyProductId = p.externalId || undefined;
+      if (!frames.length) {
+        try {
+          frames = await resolveCjImageUrls(p.title, p.suppliers?.[0]?.cjSku);
+        } catch {
+          frames = [];
+        }
+      }
+    }
+
+    if (!shopifyProductId) {
+      panelItems.push({
+        id: 'no_shopify_product',
+        severity: 'critical',
+        message: 'Producto sin externalId — publica/go-live primero',
+      });
+      return {
+        mode: process.env.ECOM_MODE || 'MOCK',
+        block: 94,
+        panel: { title: 'Attach bloqueado', items: panelItems },
+      };
+    }
+
+    let originalSource = body.originalSource;
+    let render: any = null;
+    let upload: any = null;
+
+    if (!originalSource) {
+      render = await renderSlideshowMp4({
+        frames,
+        secondsPerFrame: body.secondsPerFrame ?? 3,
+        outName: `ecom-${body.role || 'clip'}-${Date.now()}.mp4`,
+      });
+      if (render.status !== 'READY' || !render.filePath) {
+        panelItems.push({
+          id: 'render_failed',
+          severity: 'critical',
+          message: render.error || render.status,
+        });
+        return {
+          mode: process.env.ECOM_MODE || 'MOCK',
+          block: 94,
+          render,
+          panel: { title: 'Attach bloqueado', items: panelItems },
+        };
+      }
+
+      upload = await uploadLocalFileToShopify({
+        filePath: render.filePath,
+        filename: render.fileName,
+        mimeType: 'video/mp4',
+        resource: 'FILE',
+      });
+      if (!upload.ok) {
+        panelItems.push({
+          id: 'upload_failed',
+          severity: 'critical',
+          message: upload.error || 'upload failed',
+        });
+        return {
+          mode: process.env.ECOM_MODE || 'MOCK',
+          block: 94,
+          render,
+          upload,
+          panel: { title: 'Attach bloqueado', items: panelItems },
+        };
+      }
+      // Prefer resourceUrl from staged upload for productCreateMedia
+      originalSource =
+        (upload.raw as any)?.resourceUrl || upload.url || undefined;
+    }
+
+    if (!originalSource) {
+      panelItems.push({
+        id: 'no_source',
+        severity: 'critical',
+        message: 'Sin URL de video para adjuntar',
+      });
+      return {
+        mode: process.env.ECOM_MODE || 'MOCK',
+        block: 94,
+        panel: { title: 'Attach bloqueado', items: panelItems },
+      };
+    }
+
+    const attach = await attachMediaToProduct({
+      productId: shopifyProductId,
+      originalSource,
+      mediaContentType: 'VIDEO',
+      alt: title.slice(0, 100),
+    });
+
+    if (!attach.ok) {
+      // Retry as IMAGE if VIDEO not accepted for this source type
+      const attach2 = await attachMediaToProduct({
+        productId: shopifyProductId,
+        originalSource,
+        mediaContentType: 'IMAGE',
+        alt: title.slice(0, 100),
+      });
+      if (!attach2.ok) {
+        panelItems.push({
+          id: 'attach_failed',
+          severity: 'critical',
+          message: attach.error || attach2.error || 'attach failed',
+        });
+        return {
+          mode: process.env.ECOM_MODE || 'MOCK',
+          block: 94,
+          render,
+          upload,
+          attach,
+          attachRetry: attach2,
+          panel: { title: 'Attach con errores', items: panelItems },
+        };
+      }
+      return {
+        mode: process.env.ECOM_MODE || 'MOCK',
+        block: 94,
+        phase: 'C',
+        productId: body.productId || null,
+        shopifyProductId,
+        render,
+        upload,
+        attach: attach2,
+        note: 'Adjuntado como IMAGE (fallback)',
+        panel: { title: 'Video/media adjunto al producto', items: [] },
+      };
+    }
+
+    return {
+      mode: process.env.ECOM_MODE || 'MOCK',
+      block: 94,
+      phase: 'C',
+      productId: body.productId || null,
+      shopifyProductId,
+      render,
+      upload,
+      attach,
+      panel: { title: 'Video adjunto al producto', items: [] },
+    };
+  }
+
 
   /**
    * Render (optional) + upload MP4 to Shopify Files CDN.
