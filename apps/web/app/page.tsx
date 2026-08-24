@@ -64,7 +64,6 @@ function brandTitle(raw?: string | null): string {
     .replace(/^Oem And Dropshipping\s+/i, '')
     .replace(/\s+/g, ' ')
     .trim();
-  // Prefer Spanish-style short if already mixed
   if (t.length > 72) t = t.slice(0, 69).trim() + '…';
   return t;
 }
@@ -203,12 +202,13 @@ export default function Home() {
     await load();
   }
 
+  /** Pipeline de reglas/orquestador — NO genera copy (skipAiCopy: true). Copy IA es botón aparte. */
   async function runPipeline(id: string) {
     setMessage(null);
     const res = await fetch(`${API}/products/${id}/pipeline`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ skipAiCopy: false }),
+      body: JSON.stringify({ skipAiCopy: true }),
     });
     const data = await res.json();
     setMessage(`Pipeline: ${data.result?.status} · run ${data.agentRunId}`);
@@ -249,6 +249,7 @@ export default function Home() {
     await load();
   }
 
+  /** Solo copy / branding con IA — independiente del Pipeline. */
   async function generateCopy(id: string) {
     setMessage(null);
     setAiResult(null);
@@ -409,7 +410,6 @@ export default function Home() {
         {error && <p style={{ color: '#dc2626' }}>Error: {error}</p>}
       </header>
 
-      {/* Notificaciones */}
       <section
         style={{
           background: '#fff',
@@ -552,7 +552,8 @@ export default function Home() {
       <section style={{ marginBottom: '1.5rem' }}>
         <h2 style={{ fontSize: 17 }}>Productos ({products.length})</h2>
         <p style={{ fontSize: 12, color: '#64748b', marginTop: -6 }}>
-          Título de branding (sin prefijo CJ/MOCK). Descripción y media cuando existan en API.
+          Título de branding en panel. <strong>Pipeline</strong> = reglas/orquestador. <strong>Copy IA</strong> =
+          título/descripción (aparte).
         </p>
         <div style={{ display: 'grid', gap: '0.9rem' }}>
           {products.map((p) => {
@@ -634,7 +635,7 @@ export default function Home() {
                     </p>
                   ) : (
                     <p style={{ fontSize: 12, color: '#94a3b8', margin: '0.4rem 0' }}>
-                      Sin descripción IA aún — usa «Copy IA» o Pipeline.
+                      Sin descripción aún — usa solo el botón «Copy IA» cuando quieras.
                     </p>
                   )}
 
@@ -765,7 +766,7 @@ export default function Home() {
       </section>
 
       <footer style={{ marginTop: '2rem', fontSize: 12, color: '#94a3b8' }}>
-        Panel block 76 · notificaciones · branding de títulos · media si API envía imageUrls.
+        Panel block 76 · Pipeline y Copy IA independientes · notificaciones · branding.
       </footer>
     </main>
   );
