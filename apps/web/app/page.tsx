@@ -95,6 +95,10 @@ export default function Home() {
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [board, setBoard] = useState<any>(null);
+  const [secretsMeta, setSecretsMeta] = useState<any>(null);
+  const [secretsForm, setSecretsForm] = useState<Record<string, string>>({});
+  const [secretsOpen, setSecretsOpen] = useState(false);
+  const [secretsMsg, setSecretsMsg] = useState<string | null>(null);
   const [brandDrafts, setBrandDrafts] = useState<Record<string, { title: string; description: string; notes: string; open: boolean }>>({});
   const [realBusy, setRealBusy] = useState(false);
 
@@ -130,6 +134,18 @@ export default function Home() {
         setOrders(o.items || []);
         const b = await fetch(`${API}/autonomy/board`).then((x) => x.json()).catch(() => null);
         setBoard(b);
+        try {
+          const sec = await fetch(`${API}/ops/secrets`).then((x) => x.json());
+          setSecretsMeta(sec);
+          const init: Record<string, string> = {};
+          for (const [k, v] of Object.entries(sec.items || {})) {
+            if (!(v as any).secret && (v as any).value != null) init[k] = String((v as any).value);
+            else init[k] = '';
+          }
+          setSecretsForm((prev) => ({ ...init, ...prev }));
+        } catch {
+          /* optional */
+        }
       } catch {
         setJobs([]);
       }
@@ -471,6 +487,36 @@ export default function Home() {
     await load();
   }
 
+  
+  async function saveSecrets() {
+    setSecretsMsg(null);
+    const values: Record<string, string> = {};
+    for (const [k, v] of Object.entries(secretsForm)) {
+      if (String(v || '').trim()) values[k] = String(v).trim();
+    }
+    const body: any = { values };
+    if (values.ECOM_MODE === 'REAL') body.confirm = 'I_UNDERSTAND_REAL_MODE';
+    const res = await fetch(`${API}/ops/secrets`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json();
+    if (data.error) setSecretsMsg(`Error: ${data.error} ${data.message || ''}`);
+    else setSecretsMsg(`Guardado runtime: ${(data.updated || []).join(', ') || 'sin cambios'}`);
+    // clear secret fields after save so they don't linger in UI
+    setSecretsForm((prev) => {
+      const next = { ...prev };
+      for (const k of Object.keys(next)) {
+        if (['SHOPIFY_ACCESS_TOKEN','SHOPIFY_CLIENT_SECRET','SHOPIFY_WEBHOOK_SECRET','CJ_API_KEY','SERPER_API_KEY','GEMINI_API_KEY','HF_TOKEN','TELEGRAM_BOT_TOKEN'].includes(k)) {
+          next[k] = '';
+        }
+      }
+      return next;
+    });
+    await load();
+  }
+
   async function fulfillOrder(id: string) {
     setMessage(null);
     const res = await fetch(`${API}/orders/${id}/fulfill`, { method: 'POST' });
@@ -575,6 +621,121 @@ export default function Home() {
         </p>
         {error && <p style={{ color: '#dc2626' }}>Error: {error}</p>}
       </header>
+
+
+      <section
+        style={{
+          background: '#fff',
+          border: '1px solid #e2e8f0',
+          borderRadius: 10,
+          padding: '0.85rem 1rem',
+          marginBottom: '1.1rem',
+        }}
+      >
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+          <h2 style={{ margin: 0, fontSize: 16 }}>APIs · tokens · IDs</h2>
+          <button type="button" onClick={() => setSecretsOpen((o) => !o)} style={{ cursor: 'pointer' }}>
+            {secretsOpen ? 'Ocultar' : 'Configurar'}
+          </button>
+        </div>
+        <p style={{ fontSize: 12, color: '#64748b', margin: '6px 0 0' }}>
+          Cambia claves en runtime sin editar .env. No se muestran secretos completos; deja vacío para no
+          modificar. Reiniciar Docker puede restaurar el .env.
+        </p>
+        {secretsOpen && (
+          <div style={{ marginTop: 12 }}>
+            <div
+              style={{
+                display: 'grid',
+                gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))',
+                gap: 10,
+              }}
+            >
+              {[
+                ['ECOM_MODE', 'MOCK | SANDBOX | REAL'],
+                ['SHOPIFY_SHOP_DOMAIN', 'ej. e1-v1.myshopify.com'],
+                ['SHOPIFY_ACCESS_TOKEN', 'shpat_…'],
+                ['SHOPIFY_CLIENT_ID', ''],
+                ['SHOPIFY_CLIENT_SECRET', 'shpss_…'],
+                ['SHOPIFY_WEBHOOK_SECRET', ''],
+                ['CJ_API_KEY', 'CJ…@api@…'],
+                ['CJ_DEFAULT_VID', ''],
+                ['CJ_DEFAULT_SKU', ''],
+                ['CJ_LOGISTIC_NAME', 'CJPacket Ordinary'],
+                ['CJ_FROM_COUNTRY', 'CN'],
+                ['CJ_USD_COP_RATE', '4200'],
+                ['SERPER_API_KEY', ''],
+                ['GEMINI_API_KEY', ''],
+                ['GEMINI_MODEL', 'gemini-2.0-flash'],
+                ['HF_TOKEN', 'hf_…'],
+                ['TELEGRAM_BOT_TOKEN', ''],
+                ['TELEGRAM_CHAT_ID', ''],
+                ['ECOM_PUBLIC_HTTPS_URL', 'https://….trycloudflare.com'],
+                ['ECOM_AI_FORCE_LIVE', 'true | false'],
+              ].map(([key, ph]) => {
+                const meta = secretsMeta?.items?.[key];
+                const configured = meta?.configured;
+                const preview = meta?.secret ? meta?.preview : meta?.value;
+                return (
+                  <label key={key} style={{ fontSize: 12, display: 'block' }}>
+                    <span style={{ fontWeight: 600 }}>{key}</span>
+                    {configured ? (
+                      <span style={{ color: '#16a34a', marginLeft: 6 }}>· ok {preview || ''}</span>
+                    ) : (
+                      <span style={{ color: '#94a3b8', marginLeft: 6 }}>· vacío</span>
+                    )}
+                    <input
+                      type={meta?.secret ? 'password' : 'text'}
+                      placeholder={ph || (configured ? '•••• (dejar vacío = no cambiar)' : '')}
+                      value={secretsForm[key] ?? ''}
+                      onChange={(e) =>
+                        setSecretsForm((prev) => ({ ...prev, [key]: e.target.value }))
+                      }
+                      style={{
+                        width: '100%',
+                        marginTop: 4,
+                        padding: 6,
+                        boxSizing: 'border-box',
+                        border: '1px solid #cbd5e1',
+                        borderRadius: 6,
+                      }}
+                      autoComplete="off"
+                    />
+                  </label>
+                );
+              })}
+            </div>
+            <div style={{ marginTop: 12, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+              <button
+                type="button"
+                onClick={saveSecrets}
+                style={{
+                  cursor: 'pointer',
+                  background: '#0f172a',
+                  color: '#fff',
+                  border: 'none',
+                  borderRadius: 6,
+                  padding: '8px 14px',
+                  fontWeight: 600,
+                }}
+              >
+                Guardar en runtime
+              </button>
+              <button
+                type="button"
+                onClick={async () => {
+                  const sec = await fetch(`${API}/ops/secrets`).then((x) => x.json());
+                  setSecretsMeta(sec);
+                }}
+                style={{ cursor: 'pointer' }}
+              >
+                Refrescar estado
+              </button>
+              {secretsMsg && <span style={{ fontSize: 13, color: '#334155' }}>{secretsMsg}</span>}
+            </div>
+          </div>
+        )}
+      </section>
 
       <section
         style={{

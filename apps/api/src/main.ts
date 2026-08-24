@@ -2295,6 +2295,153 @@ class OpsController {
     await writeAudit('INVENTORY_SYNC_ALL', 'System', 'inventory', { count: results.length });
     return { mode: process.env.ECOM_MODE || 'MOCK', count: results.length, results };
   }
+  /** Lista enmascarada de integraciones configurables en runtime */
+  @Get('secrets')
+  listSecrets() {
+    const mask = (v?: string | null) => {
+      const s = String(v || '').trim();
+      if (!s) return { configured: false, preview: '', length: 0 };
+      if (s.length <= 8) return { configured: true, preview: '****', length: s.length };
+      return {
+        configured: true,
+        preview: s.slice(0, 4) + '…' + s.slice(-4),
+        length: s.length,
+      };
+    };
+    const keys = [
+      'ECOM_MODE',
+      'SHOPIFY_SHOP_DOMAIN',
+      'SHOPIFY_SHOP',
+      'SHOPIFY_ACCESS_TOKEN',
+      'SHOPIFY_CLIENT_ID',
+      'SHOPIFY_CLIENT_SECRET',
+      'SHOPIFY_WEBHOOK_SECRET',
+      'SHOPIFY_API_VERSION',
+      'CJ_API_KEY',
+      'CJ_DEFAULT_VID',
+      'CJ_DEFAULT_SKU',
+      'CJ_LOGISTIC_NAME',
+      'CJ_FROM_COUNTRY',
+      'CJ_USD_COP_RATE',
+      'SERPER_API_KEY',
+      'GEMINI_API_KEY',
+      'GEMINI_MODEL',
+      'HF_TOKEN',
+      'HF_MODEL',
+      'ECOM_AI_FORCE_LIVE',
+      'ECOM_ALLOW_PAID_AI',
+      'TELEGRAM_BOT_TOKEN',
+      'TELEGRAM_CHAT_ID',
+      'APP_URL',
+      'API_URL',
+      'ECOM_PUBLIC_HTTPS_URL',
+      'ECOM_DISCOVERY_INTERVAL_MINUTES',
+      'ECOM_REAL_CONFIRM',
+    ] as const;
+    const items: Record<string, any> = {};
+    for (const k of keys) {
+      if (k === 'ECOM_MODE' || k === 'GEMINI_MODEL' || k === 'HF_MODEL' || k === 'SHOPIFY_API_VERSION' || k === 'CJ_LOGISTIC_NAME' || k === 'CJ_FROM_COUNTRY' || k === 'CJ_USD_COP_RATE' || k === 'CJ_DEFAULT_VID' || k === 'CJ_DEFAULT_SKU' || k === 'APP_URL' || k === 'API_URL' || k === 'ECOM_PUBLIC_HTTPS_URL' || k === 'ECOM_DISCOVERY_INTERVAL_MINUTES' || k === 'SHOPIFY_SHOP_DOMAIN' || k === 'SHOPIFY_SHOP') {
+        items[k] = {
+          configured: Boolean(String(process.env[k] || '').trim()),
+          value: String(process.env[k] || ''),
+          secret: false,
+        };
+      } else {
+        items[k] = { ...mask(process.env[k]), secret: true };
+      }
+    }
+    return {
+      mode: process.env.ECOM_MODE || 'MOCK',
+      note: 'Valores en proceso (runtime). No reescribe .env. Reiniciar Docker puede volver al archivo.',
+      items,
+    };
+  }
+
+  /** Actualiza process.env en runtime. Solo claves en allowlist. */
+  @Post('secrets')
+  setSecrets(
+    @Body()
+    body: {
+      values?: Record<string, string>;
+      confirm?: string;
+    },
+  ) {
+    const allow = new Set([
+      'ECOM_MODE',
+      'SHOPIFY_SHOP_DOMAIN',
+      'SHOPIFY_SHOP',
+      'SHOPIFY_ACCESS_TOKEN',
+      'SHOPIFY_CLIENT_ID',
+      'SHOPIFY_CLIENT_SECRET',
+      'SHOPIFY_WEBHOOK_SECRET',
+      'SHOPIFY_API_VERSION',
+      'CJ_API_KEY',
+      'CJ_DEFAULT_VID',
+      'CJ_DEFAULT_SKU',
+      'CJ_LOGISTIC_NAME',
+      'CJ_FROM_COUNTRY',
+      'CJ_USD_COP_RATE',
+      'SERPER_API_KEY',
+      'GEMINI_API_KEY',
+      'GEMINI_MODEL',
+      'HF_TOKEN',
+      'HF_MODEL',
+      'ECOM_AI_FORCE_LIVE',
+      'ECOM_ALLOW_PAID_AI',
+      'TELEGRAM_BOT_TOKEN',
+      'TELEGRAM_CHAT_ID',
+      'APP_URL',
+      'API_URL',
+      'ECOM_PUBLIC_HTTPS_URL',
+      'ECOM_DISCOVERY_INTERVAL_MINUTES',
+      'ECOM_REAL_CONFIRM',
+    ]);
+    const incoming = body?.values || {};
+    const updated: string[] = [];
+    const rejected: string[] = [];
+    for (const [k, v] of Object.entries(incoming)) {
+      if (!allow.has(k)) {
+        rejected.push(k);
+        continue;
+      }
+      if (v === undefined || v === null) continue;
+      const val = String(v).trim();
+      // vacío = no tocar (para no borrar por error al enviar form parcial)
+      if (val === '') continue;
+      if (k === 'ECOM_MODE') {
+        const m = val.toUpperCase();
+        if (!['MOCK', 'SANDBOX', 'REAL'].includes(m)) {
+          rejected.push(k);
+          continue;
+        }
+        if (m === 'REAL' && String(body?.confirm || '') !== 'I_UNDERSTAND_REAL_MODE') {
+          return {
+            error: 'confirm_required',
+            message: 'REAL requiere confirm=I_UNDERSTAND_REAL_MODE',
+          };
+        }
+        process.env.ECOM_MODE = m;
+        if (m === 'REAL') process.env.ECOM_REAL_CONFIRM = 'I_UNDERSTAND_REAL_MODE';
+        updated.push(k);
+        continue;
+      }
+      process.env[k] = val;
+      updated.push(k);
+    }
+    try {
+      void writeAudit('OPS_SECRETS_UPDATE', 'System', 'secrets', {
+        updated,
+        rejected,
+      });
+    } catch {}
+    return {
+      ok: true,
+      updated,
+      rejected,
+      mode: process.env.ECOM_MODE || 'MOCK',
+      note: 'Aplicado en runtime. No escribe .env.',
+    };
+  }
 }
 
 
