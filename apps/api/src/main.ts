@@ -176,6 +176,15 @@ import {
   filterHttpsImages,
 } from '../../../packages/phase-b/src/index';
 
+import {
+  PHASE_C_META,
+  buildPhaseCChecks,
+  summarizePhaseC,
+  buildProductLanding,
+  renderSlideshowMp4,
+  ffmpegAvailable,
+} from '../../../packages/phase-c/src/index';
+
 
 
 
@@ -630,7 +639,7 @@ class HealthController {
       service: 'ecom-api',
       mode: MODE,
       timestamp: new Date().toISOString(),
-      block: 87,
+      block: 92,
       aiRouter: true,
       orchestrator: true,
       agentRuns: true,
@@ -3750,6 +3759,200 @@ class CreativeController {
 
 
 
+
+@Controller('phase-c')
+class PhaseCController {
+  @Get('meta')
+  meta() {
+    return {
+      mode: process.env.ECOM_MODE || 'MOCK',
+      ...PHASE_C_META,
+      ffmpeg: ffmpegAvailable(),
+    };
+  }
+
+  @Get('verify')
+  async verify() {
+    const mode = process.env.ECOM_MODE || 'MOCK';
+    const published = await prisma.product.count({ where: { status: 'PUBLISHED' } });
+    const total = await prisma.product.count();
+    const items = buildPhaseCChecks({
+      mode,
+      hasLandingBuilder: true,
+      hasFfmpeg: ffmpegAvailable(),
+      landingsGenerated: total,
+      publishedCount: published,
+    });
+    const summary = summarizePhaseC(items);
+    const errors = items.filter((i) => !i.ok).map((i) => ({
+      id: i.id,
+      severity: i.severity,
+      message: i.message,
+      detail: i.detail,
+    }));
+    // also surface ffmpeg as panel item even if severity warning with ok:true
+    const warnPanel = items
+      .filter((i) => i.severity === 'warning')
+      .map((i) => ({
+        id: i.id,
+        severity: i.severity,
+        message: i.message,
+        detail: i.detail,
+        ok: i.ok,
+      }));
+
+    return {
+      mode,
+      block: 92,
+      phase: 'C',
+      ...summary,
+      ffmpeg: ffmpegAvailable(),
+      errors,
+      panel: errors.length
+        ? { title: 'Errores / advertencias Fase C', items: errors }
+        : warnPanel.some((w) => w.id === 'ffmpeg' && !ffmpegAvailable())
+          ? {
+              title: 'Fase C OK con avisos',
+              items: warnPanel.filter((w) => w.id === 'ffmpeg'),
+            }
+          : { title: 'Fase C OK', items: [] },
+      next: [
+        'GET /phase-c/landing/:productId',
+        'POST /phase-c/render-video {"productId":"..."} o {"frames":["https://..."]}',
+        'Instalar ffmpeg en Docker si quieres MP4 real en el API',
+      ],
+    };
+  }
+
+  @Get('landing/:id')
+  async landingGet(@Param('id') id: string) {
+    const p = await prisma.product.findUnique({
+      where: { id },
+      include: { suppliers: { orderBy: { isPrimary: 'desc' }, take: 1 } },
+    });
+    if (!p) return { error: 'not_found' };
+
+    let imageUrls: string[] = [];
+    try {
+      const primary = p.suppliers?.[0];
+      imageUrls = await resolveCjImageUrls(p.title, primary?.cjSku);
+    } catch {
+      imageUrls = [];
+    }
+
+    const landing = buildProductLanding({
+      title: p.title,
+      description: p.description,
+      salePrice: p.salePrice != null ? Number(p.salePrice) : null,
+      currency: p.currency || 'COP',
+      imageUrls,
+      productId: p.id,
+      shopifyUrl: p.externalId
+        ? `https://${process.env.SHOPIFY_SHOP_DOMAIN || process.env.SHOPIFY_SHOP || 'shop'}.myshopify.com/products/...`
+        : null,
+    });
+
+    return {
+      mode: process.env.ECOM_MODE || 'MOCK',
+      block: 90,
+      phase: 'C',
+      productId: p.id,
+      landing,
+      validation: {
+        ok: landing.imageCount > 0 && landing.html.length > 200,
+        issues: landing.imageCount ? [] : ['no_images'],
+      },
+      panel:
+        landing.imageCount > 0
+          ? { title: 'Landing OK', items: [] }
+          : {
+              title: 'Landing sin imágenes',
+              items: [{ id: 'no_images', severity: 'warning', message: 'Sin URLs CJ' }],
+            },
+    };
+  }
+
+  @Post('landing')
+  async landingPost(@Body() body: { productId?: string }) {
+    if (!body?.productId) return { error: 'productId_required' };
+    // reuse GET logic
+    const ctrl = this as any;
+    return this.landingGet(body.productId);
+  }
+
+  /**
+   * Render slideshow MP4 from product frames or explicit frame URLs.
+   */
+  @Post('render-video')
+  async renderVideo(
+    @Body()
+    body: {
+      productId?: string;
+      frames?: string[];
+      secondsPerFrame?: number;
+      role?: string;
+    },
+  ) {
+    let frames = (body?.frames || []).filter((u) => typeof u === 'string');
+
+    if (!frames.length && body?.productId) {
+      const p = await prisma.product.findUnique({
+        where: { id: body.productId },
+        include: { suppliers: { orderBy: { isPrimary: 'desc' }, take: 1 } },
+      });
+      if (!p) return { error: 'not_found' };
+      try {
+        frames = await resolveCjImageUrls(p.title, p.suppliers?.[0]?.cjSku);
+      } catch {
+        frames = [];
+      }
+    }
+
+    const result = await renderSlideshowMp4({
+      frames,
+      secondsPerFrame: body?.secondsPerFrame ?? 3,
+      outName: `ecom-${body?.role || 'clip'}-${Date.now()}.mp4`,
+    });
+
+    const panelItems: any[] = [];
+    if (result.status === 'SKIPPED_NO_FFMPEG') {
+      panelItems.push({
+        id: 'ffmpeg_missing',
+        severity: 'warning',
+        message: result.note || 'FFmpeg no instalado',
+      });
+    }
+    if (result.status === 'FAILED') {
+      panelItems.push({
+        id: 'render_failed',
+        severity: 'critical',
+        message: result.error || 'render failed',
+      });
+    }
+    if (result.status === 'SKIPPED_NO_FRAMES') {
+      panelItems.push({
+        id: 'no_frames',
+        severity: 'warning',
+        message: 'Sin frames para el video',
+      });
+    }
+
+    return {
+      mode: process.env.ECOM_MODE || 'MOCK',
+      block: 92,
+      phase: 'C',
+      productId: body?.productId || null,
+      role: body?.role || 'slideshow',
+      framesRequested: frames.length,
+      result,
+      panel: panelItems.length
+        ? { title: 'Render con avisos / errores', items: panelItems }
+        : { title: 'Render MP4 OK', items: [] },
+    };
+  }
+}
+
+
 @Controller('phase-b')
 class PhaseBController {
   @Get('meta')
@@ -4242,7 +4445,7 @@ class AutonomyController {
 
 
 @Module({
-  controllers: [PhaseBController, PhaseAController, AutonomyController, CreativeController, ReleaseController, HardeningController, CatalogQualityController, RealCloseController, SeoController, AdsController, DeployController, TrendsController, MarketingController, AnalyticsController, ScoringController, ContentController, DashboardController, OpsController, 
+  controllers: [PhaseCController, PhaseBController, PhaseAController, AutonomyController, CreativeController, ReleaseController, HardeningController, CatalogQualityController, RealCloseController, SeoController, AdsController, DeployController, TrendsController, MarketingController, AnalyticsController, ScoringController, ContentController, DashboardController, OpsController, 
     HealthController,
     DiscoveryController,
     JobsController,
@@ -4322,7 +4525,7 @@ async function bootstrap() {
   const app = await NestFactory.create(AppModule);
   app.enableCors({ origin: process.env.APP_URL ?? 'http://localhost:3000' });
   await app.listen(Number(process.env.API_PORT ?? 4000));
-  console.log(`ECOM API block-87 (phase-B branding) on ${process.env.API_PORT ?? 4000} mode=${MODE}`);
+  console.log(`ECOM API block-92 (phase-C landings+mp4) on ${process.env.API_PORT ?? 4000} mode=${MODE}`);
 }
 
 void bootstrap();
