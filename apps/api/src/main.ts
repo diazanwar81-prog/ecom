@@ -1818,16 +1818,7 @@ class ProductsController {
     const data: any = {};
     if (result.ok && result.text) {
       data.description = result.text.slice(0, 4000);
-      // Heurística: si el modelo devuelve "Título: ...\nDescripción: ..." separar
-      const m = String(result.text).match(
-        /(?:t[ií]tulo|title)\s*[:：]\s*(.+)
-+(?:descripci[oó]n|description)?\s*[:：]?\s*([\s\S]+)/i,
-      );
-      if (m && body?.applyTitle !== false) {
-        const cleanT = m[1].replace(/[*#]/g, '').trim().slice(0, 180);
-        if (cleanT.length > 8) data.title = cleanT;
-        if (m[2]?.trim()) data.description = m[2].trim().slice(0, 4000);
-      } else if (body?.applyTitle && body?.title) {
+      if (body?.applyTitle && body?.title) {
         data.title = body.title.trim().slice(0, 180);
       }
     } else if (body?.applyTitle && body?.title) {
