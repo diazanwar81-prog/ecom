@@ -282,21 +282,23 @@ function isWeakProductName(name: string): boolean {
   return enHits >= 2;
 }
 
-/** Avisos legales/honestos fijos — nunca precio, stock ni margen del modelo */
 const HONEST_INFO = [
   'Revisa medidas, color y material en la ficha antes de comprar',
   'Los tiempos de envío internacional pueden variar según el destino',
   'Sin afirmaciones médicas ni resultados garantizados',
 ];
 
+/** Solo líneas inventadas por el modelo (precio/stock/margen/políticas falsas) */
 function isBadImportantLine(s: string): boolean {
-  return /(\$|COP|USD|precio|stock|unidades|margen|%|garantiz|30\s*d[ií]as|devoluci[oó]n sin costo|impuestos ni tasas)/i.test(
-    s || '',
+  const t = (s || '').trim();
+  if (!t) return true;
+  if (HONEST_INFO.some((h) => h === t)) return false;
+  return /(\$|\bCOP\b|\bUSD\b|precio\s*:|stock|unidades|margen|\d+\s*%|30\s*d[ií]as|devoluci[oó]n sin costo|impuestos ni tasas)/i.test(
+    t,
   );
 }
 
 function safeImportantInfo(_items?: string[]): string[] {
-  // Siempre plantilla honesta: el modelo suele inventar precio/stock/margen/políticas
   return [...HONEST_INFO];
 }
 
@@ -710,5 +712,5 @@ export const CONTENT_META = {
     'polish_es_postprocess',
     'honest_important_info',
   ],
-  note: 'importantInfo siempre plantilla honesta (sin precio/stock/margen del modelo).',
+  note: 'importantInfo siempre plantilla honesta; validador no marca el disclaimer de garantizados.',
 };
