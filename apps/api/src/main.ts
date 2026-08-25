@@ -12,6 +12,7 @@ import {
 import {
   complete as aiComplete,
   generateProductCopy,
+  parseProductCopy,
   getRouterStatus,
 } from '../../../packages/ai-router/src/index';
 import {
@@ -647,7 +648,7 @@ class HealthController {
       service: 'ecom-api',
       mode: MODE,
       timestamp: new Date().toISOString(),
-      block: 100,
+      block: 101,
       aiRouter: true,
       orchestrator: true,
       agentRuns: true,
@@ -1365,66 +1366,28 @@ class AiController {
 }
 
 
-async function resolveCjImageUrls(title: string, sku?: string | null): Promise<string[]> {
+async function resolveCjImageUrls(
+  title: string,
+  sku?: string | null,
+  vid?: string | null,
+): Promise<string[]> {
+  try {
+    if (typeof resolveCjProductImages === 'function') {
+      const r = await resolveCjProductImages({ vid: vid || undefined, sku: sku || undefined, title, limit: 6 });
+      if (r.urls?.length) return r.urls;
+    }
+  } catch {}
   const urls: string[] = [];
   const push = (u: unknown) => {
     const s = String(u || '').trim();
     if (s && /^https?:\/\//i.test(s) && !urls.includes(s)) urls.push(s);
   };
   try {
-    // A) by SKU string search
-    if (sku && String(sku).trim()) {
-      try {
-        const bySku = await searchCjProducts({ keyword: String(sku).trim(), pageSize: 5 });
-        if (bySku.ok && bySku.items?.length) {
-          for (const item of bySku.items as any[]) {
-            push(item.productImage);
-            push(item.productImageEn);
-            push(item.bigImage);
-            const list = item.productImageList || item.imageList || item.productImgList;
-            if (Array.isArray(list)) list.slice(0, 8).forEach(push);
-          }
-        }
-      } catch {}
+    if (sku) {
+      const bySku = await searchCjProducts({ keyword: String(sku).trim(), pageSize: 5 });
+      for (const item of bySku.items || []) push(item.productImage);
     }
-    // B) keyword from cleaned title
-    if (urls.length < 1) {
-      const cleaned = String(title || '')
-        .replace(/\[(?:MOCK|SERPER\+CJ|SERPER|CJ)\]\s*/gi, '')
-        .replace(/Cross-Border|Dropshipping/gi, ' ')
-        .replace(/[^a-zA-Z0-9\u00C0-\u024F\s]/g, ' ')
-        .split(/\s+/)
-        .filter((w) => w.length > 3)
-        .slice(0, 6)
-        .join(' ')
-        .trim();
-      if (cleaned) {
-        try {
-          const found = await searchCjProducts({ keyword: cleaned, pageSize: 8 });
-          if (found.ok && found.items?.length) {
-            for (const item of found.items as any[]) {
-              push(item.productImage);
-              push(item.productImageEn);
-              push(item.bigImage);
-            }
-          }
-        } catch {}
-      }
-    }
-    // C) matchCjByKeyword helper if present
-    if (urls.length < 1 && typeof (matchCjByKeyword as any) === 'function') {
-      try {
-        const kw = String(sku || title || '').slice(0, 40);
-        const m = await (matchCjByKeyword as any)(kw);
-        if (m?.product) {
-          push(m.product.productImage);
-          push(m.product.productImageEn);
-        }
-      } catch {}
-    }
-  } catch {
-    /* ignore */
-  }
+  } catch {}
   return urls.slice(0, 6);
 }
 
@@ -1783,9 +1746,34 @@ class ProductsController {
       });
     }
 
+
+    const gateImages = (Array.isArray(enriched.imageUrls) && enriched.imageUrls.length)
+      ? enriched.imageUrls
+      : await resolveCjImageUrls(liveTitle, enriched.cjSku, enriched.cjVariantId);
+    const gate = evaluatePublishGate({
+      cjSku: enriched.cjSku,
+      cjVariantId: enriched.cjVariantId,
+      verified: enriched.verified,
+      stock: enriched.stock,
+      marginPercent: enriched.marginPercent,
+      marginBand: enriched.marginBand,
+      imageUrls: gateImages,
+      description: liveDescription || enriched.description,
+      title: liveTitle,
+      opportunityScore: enriched.opportunityScore,
+      confidence: enriched.confidence,
+      isFirstPublication: false,
+      approvalStatus: 'APPROVED',
+      strictBranding: String(process.env.ECOM_STRICT_BRANDING || '').toLowerCase() === 'true',
+    });
+    if (!gate.canPublish) {
+      await writeAudit('GO_LIVE_BLOCKED', 'Product', id, gate);
+      return { mode: MODE, error: 'quality_gate_blocked', reasons: gate.reasons, messages: gate.messages, checks: gate.checks, snapshot: gate.snapshot };
+    }
+
     const sku = enriched.cjSku || `ECOM-${id.slice(-8)}`;
     // Block 19: attach CJ catalog images when available
-    const imageUrls = await resolveCjImageUrls(liveTitle, enriched.cjSku);
+    const imageUrls = await resolveCjImageUrls(liveTitle, enriched.cjSku, enriched.cjVariantId);
     const result = await publishProduct({
       title: liveTitle,
       description: liveDescription || liveTitle,
@@ -1873,7 +1861,7 @@ class ProductsController {
     });
     if (!p) return { error: 'not_found' };
     const primary = p.suppliers && p.suppliers[0];
-    const urls = await resolveCjImageUrls(p.title, primary ? primary.cjSku : null);
+    const urls = await resolveCjImageUrls(p.title, primary ? primary.cjSku : null, primary ? primary.cjVariantId : null);
     let updated = p;
     try {
       updated = await prisma.product.update({
