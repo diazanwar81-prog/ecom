@@ -991,6 +991,13 @@ class CjController {
     return getCjStatus();
   }
 
+  /** Búsqueda directa en el catálogo real de CJ por palabra clave — devuelve pid por producto. */
+  @Get('search')
+  async search(@Query('keyword') keyword?: string, @Query('pageSize') pageSize?: string) {
+    if (!keyword) return { error: 'keyword_required', message: 'Pasa ?keyword=algo (ej. phone case)' };
+    return searchCjProducts({ keyword, pageSize: Math.min(Number(pageSize) || 5, 10) });
+  }
+
   /**
    * Diagnóstico temporal (Fase C-2): muestra la respuesta cruda del endpoint
    * real de CJ /product/variant/query, para ver si trae stock/inventario y
