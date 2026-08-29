@@ -207,7 +207,8 @@ export async function searchCjProducts(opts: {
 /** Variants for a product id (GET). */
 export async function getCjVariants(
   pid: string,
-): Promise<{ ok: boolean; items: CjVariantHit[]; error?: string }> {
+  opts: { includeRaw?: boolean } = {},
+): Promise<{ ok: boolean; items: CjVariantHit[]; error?: string; raw?: unknown }> {
   if (!pid) return { ok: false, items: [], error: 'pid required' };
   const auth = await getCjAccessToken();
   if (!auth.ok || !auth.accessToken) {
@@ -237,7 +238,11 @@ export async function getCjVariants(
       variantImage: row.variantImage || row.variantImageEn || row.productImage || undefined,
     }));
 
-    return { ok: true, items: items.filter((v) => v.vid || v.variantSku) };
+    return {
+      ok: true,
+      items: items.filter((v) => v.vid || v.variantSku),
+      raw: opts.includeRaw ? data : undefined,
+    };
   } catch (e: any) {
     return { ok: false, items: [], error: e?.message || 'variant network error' };
   }

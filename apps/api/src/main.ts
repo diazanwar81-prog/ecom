@@ -27,7 +27,7 @@ import {
 } from '../../../packages/shopify/src/index';
 import { uploadLocalFileToShopify } from '../../../packages/shopify/src/files';
 import { attachMediaToProduct } from '../../../packages/shopify/src/product-media';
-import { getCjStatus, fulfillOrder, searchCjProducts } from '../../../packages/cj/src/index';
+import { getCjStatus, fulfillOrder, searchCjProducts, getCjVariants } from '../../../packages/cj/src/index';
 import {
   runProductPipeline,
   getOrchestratorMeta,
@@ -989,6 +989,17 @@ class CjController {
   @Get('status')
   status() {
     return getCjStatus();
+  }
+
+  /**
+   * Diagnóstico temporal (Fase C-2): muestra la respuesta cruda del endpoint
+   * real de CJ /product/variant/query, para ver si trae stock/inventario y
+   * bajo qué nombre de campo, antes de automatizar la sincronización.
+   */
+  @Get('debug/variants')
+  async debugVariants(@Query('pid') pid?: string) {
+    if (!pid) return { error: 'pid_required', message: 'Pasa ?pid=xxxx (el product id de CJ)' };
+    return getCjVariants(pid, { includeRaw: true });
   }
 }
 
