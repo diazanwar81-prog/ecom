@@ -1,4 +1,5 @@
 import 'reflect-metadata';
+import { randomBytes, scryptSync, timingSafeEqual as cryptoTimingSafeEqual, createHmac as createHmacSig } from 'crypto';
 import { Controller, Get, Module, Injectable, Post, Body, Param, Query, Headers, Req } from '@nestjs/common';
 import type { RawBodyRequest } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
@@ -1405,6 +1406,80 @@ async function resolveCjImageUrls(
   return urls.slice(0, 6);
 }
 
+async function runInventorySyncAll() {
+  const products = await prisma.product.findMany({
+    where: { status: 'PUBLISHED' },
+    include: { suppliers: true },
+    take: 50,
+  });
+  const results: any[] = [];
+  for (const p of products) {
+    const primary = p.suppliers.find((s) => s.isPrimary) || p.suppliers[0];
+    const stock = primary?.stock ?? null;
+    const decision = stockPauseDecision(stock);
+    if (decision.shouldPause && p.status === 'PUBLISHED') {
+      await prisma.product.update({ where: { id: p.id }, data: { status: 'PAUSED' } });
+      void alertOps('STOCK_PAUSE', { productId: p.id, title: p.title.slice(0, 80) });
+    }
+    results.push({ productId: p.id, stock, ...decision });
+  }
+  await writeAudit('INVENTORY_SYNC_ALL', 'System', 'inventory', { count: results.length });
+  return { mode: process.env.ECOM_MODE || 'MOCK', count: results.length, results };
+}
+
+async function runDailyDigest() {
+  const published = await prisma.product.count({ where: { status: 'PUBLISHED' } });
+  const pendingApprovals = await prisma.approval.count({ where: { status: 'PENDING' } });
+  const paidOrders = await prisma.order.count({ where: { status: 'PAID' } });
+  const fulfilledOrders = await prisma.order.count({ where: { status: 'FULFILLED' } });
+  const pausedProducts = await prisma.product.count({ where: { status: 'PAUSED' } });
+  const date = new Date().toLocaleDateString('es-CO', { timeZone: 'America/Bogota' });
+  const digest = buildDailyDigest({
+    mode: process.env.ECOM_MODE || 'MOCK',
+    published,
+    pendingApprovals,
+    paidOrders,
+    fulfilledOrders,
+    pausedProducts,
+    stockRisks: 0,
+    jobsFailed: 0,
+    date,
+  });
+  try {
+    void alertOps('DAILY_DIGEST', { body: digest.body, severity: digest.severity });
+  } catch {}
+  await writeAudit('DAILY_DIGEST', 'System', 'digest', digest);
+  return { ok: true, digest };
+}
+
+let lastDigestDateBogota = '';
+
+/** Lightweight in-process schedulers for ops jobs — same pattern as the discovery scheduler. */
+function startOpsSchedulers() {
+  const inventoryMin = Number(process.env.ECOM_INVENTORY_INTERVAL_MINUTES || 20);
+  if (inventoryMin > 0) {
+    setInterval(() => {
+      runInventorySyncAll().catch((e) => console.warn('[ops] inventory sync failed', e?.message));
+    }, inventoryMin * 60_000);
+    console.log(`[ops] inventory scheduler ON every ${inventoryMin} min`);
+  }
+
+  // Daily digest: checked every 15 min, fires once when local Bogota hour === target and not yet sent today.
+  const digestHour = 9;
+  setInterval(() => {
+    const now = new Date();
+    const bogotaHour = Number(
+      now.toLocaleString('en-US', { timeZone: 'America/Bogota', hour: 'numeric', hour12: false }),
+    );
+    const bogotaDate = now.toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
+    if (bogotaHour === digestHour && lastDigestDateBogota !== bogotaDate) {
+      lastDigestDateBogota = bogotaDate;
+      runDailyDigest().catch((e) => console.warn('[ops] daily digest failed', e?.message));
+    }
+  }, 15 * 60_000);
+  console.log(`[ops] daily digest scheduler ON (America/Bogota ${digestHour}:00)`);
+}
+
 function cleanProductTitle(raw: string): string {
   return String(raw || '')
     .replace(/\[(?:MOCK|SERPER\+CJ|SERPER|CJ)\]\s*/gi, '')
@@ -2266,22 +2341,108 @@ class AuditController {
   }
 }
 
+function hashPassword(password: string): string {
+  const salt = randomBytes(16).toString('hex');
+  const hash = scryptSync(password, salt, 64).toString('hex');
+  return `${salt}:${hash}`;
+}
+
+function verifyPassword(password: string, stored: string | null | undefined): boolean {
+  if (!stored || !stored.includes(':')) return false;
+  const [salt, hash] = stored.split(':');
+  try {
+    const candidate = scryptSync(password, salt, 64);
+    const expected = Buffer.from(hash, 'hex');
+    if (candidate.length !== expected.length) return false;
+    return cryptoTimingSafeEqual(candidate, expected);
+  } catch {
+    return false;
+  }
+}
+
+function sessionSecret(): string {
+  const s = (process.env.SESSION_SECRET || '').trim();
+  return s.length >= 16 ? s : 'ecom-dev-insecure-fallback-secret';
+}
+
+function issueSessionToken(userId: string, ttlMs = 7 * 24 * 60 * 60 * 1000): string {
+  const payload = Buffer.from(JSON.stringify({ uid: userId, exp: Date.now() + ttlMs })).toString(
+    'base64url',
+  );
+  const sig = createHmacSig('sha256', sessionSecret()).update(payload).digest('base64url');
+  return `${payload}.${sig}`;
+}
+
+function verifySessionToken(token: string | undefined): { userId: string } | null {
+  if (!token) return null;
+  const [payload, sig] = token.split('.');
+  if (!payload || !sig) return null;
+  const expectedSig = createHmacSig('sha256', sessionSecret()).update(payload).digest('base64url');
+  try {
+    const a = Buffer.from(sig);
+    const b = Buffer.from(expectedSig);
+    if (a.length !== b.length || !cryptoTimingSafeEqual(a, b)) return null;
+    const data = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
+    if (!data?.uid || !data?.exp || Date.now() > Number(data.exp)) return null;
+    return { userId: String(data.uid) };
+  } catch {
+    return null;
+  }
+}
+
 @Controller('auth')
 class AuthController {
   @Get('me')
-  async me() {
-    const user = await prisma.user.findFirst({ where: { email: 'admin@ecom.local' } });
+  async me(@Headers('authorization') authHeader?: string) {
+    const token = authHeader?.replace(/^Bearer\s+/i, '').trim();
+    const session = verifySessionToken(token);
+    if (!session) return { mode: MODE, user: null };
+    const user = await prisma.user.findUnique({ where: { id: session.userId } });
     return { mode: MODE, user: user ? { id: user.id, email: user.email, name: user.name, role: user.role } : null };
   }
 
+  /** Sets the password for the sole admin the first time — requires SESSION_SECRET as proof of server access. */
+  @Post('bootstrap-password')
+  async bootstrapPassword(
+    @Body() body: { email?: string; password?: string; setupToken?: string },
+  ) {
+    if (String(body?.setupToken || '') !== sessionSecret()) {
+      return { error: 'invalid_setup_token' };
+    }
+    if (!body?.password || body.password.length < 8) {
+      return { error: 'password_too_short', message: 'Mínimo 8 caracteres' };
+    }
+    const email = body.email || 'admin@ecom.local';
+    const user = await prisma.user.findUnique({ where: { email } });
+    if (!user) return { error: 'user_not_found' };
+    if (user.passwordHash) {
+      return { error: 'password_already_set', message: 'Usa /auth/login o cambia la contraseña desde el panel' };
+    }
+    await prisma.user.update({ where: { id: user.id }, data: { passwordHash: hashPassword(body.password) } });
+    await writeAudit('AUTH_PASSWORD_BOOTSTRAPPED', 'User', user.id);
+    return { ok: true, message: 'Contraseña establecida. Ya puedes usar /auth/login.' };
+  }
+
   @Post('login')
-  async login(@Body() body: { email?: string }) {
-    const user = await prisma.user.findFirst({ where: { email: body.email || 'admin@ecom.local' } });
+  async login(@Body() body: { email?: string; password?: string }) {
+    const email = body.email || 'admin@ecom.local';
+    const user = await prisma.user.findUnique({ where: { email } });
     if (!user) return { error: 'invalid_credentials' };
-    await writeAudit('LOGIN_MOCK', 'User', user.id);
+    if (!user.passwordHash) {
+      return {
+        error: 'password_not_set',
+        message: 'Este usuario no tiene contraseña. Usa POST /auth/bootstrap-password primero.',
+      };
+    }
+    if (!body.password || !verifyPassword(body.password, user.passwordHash)) {
+      await writeAudit('LOGIN_FAILED', 'User', user.id);
+      return { error: 'invalid_credentials' };
+    }
+    const token = issueSessionToken(user.id);
+    await writeAudit('LOGIN_OK', 'User', user.id);
     return {
       mode: MODE,
-      token: 'mock-session-token',
+      token,
       user: { id: user.id, email: user.email, name: user.name, role: user.role },
     };
   }
@@ -2348,28 +2509,7 @@ class OpsController {
 
   @Post('digest/run')
   async runDigest() {
-    const published = await prisma.product.count({ where: { status: 'PUBLISHED' } });
-    const pendingApprovals = await prisma.approval.count({ where: { status: 'PENDING' } });
-    const paidOrders = await prisma.order.count({ where: { status: 'PAID' } });
-    const fulfilledOrders = await prisma.order.count({ where: { status: 'FULFILLED' } });
-    const pausedProducts = await prisma.product.count({ where: { status: 'PAUSED' } });
-    const date = new Date().toLocaleDateString('es-CO', { timeZone: 'America/Bogota' });
-    const digest = buildDailyDigest({
-      mode: process.env.ECOM_MODE || 'MOCK',
-      published,
-      pendingApprovals,
-      paidOrders,
-      fulfilledOrders,
-      pausedProducts,
-      stockRisks: 0,
-      jobsFailed: 0,
-      date,
-    });
-    try {
-      void alertOps('DAILY_DIGEST', { body: digest.body, severity: digest.severity });
-    } catch {}
-    await writeAudit('DAILY_DIGEST', 'System', 'digest', digest);
-    return { ok: true, digest };
+    return runDailyDigest();
   }
 
   @Get('export/products.csv')
@@ -2391,26 +2531,20 @@ class OpsController {
     return header + '\n' + rows.join('\n');
   }
 
+  @Get('export/audit.csv')
+  async exportAudit(@Query('limit') limit = '1000') {
+    const n = Math.min(Number(limit) || 1000, 5000);
+    const items = await prisma.auditLog.findMany({ orderBy: { createdAt: 'desc' }, take: n });
+    const header = 'id,action,entityType,entityId,createdAt';
+    const rows = items.map((a) =>
+      [a.id, a.action, a.entityType, a.entityId, a.createdAt.toISOString()].join(','),
+    );
+    return header + '\n' + rows.join('\n');
+  }
+
   @Post('inventory/sync-all')
   async syncAllInventory() {
-    const products = await prisma.product.findMany({
-      where: { status: 'PUBLISHED' },
-      include: { suppliers: true },
-      take: 50,
-    });
-    const results: any[] = [];
-    for (const p of products) {
-      const primary = p.suppliers.find((s) => s.isPrimary) || p.suppliers[0];
-      const stock = primary?.stock ?? null;
-      const decision = stockPauseDecision(stock);
-      if (decision.shouldPause && p.status === 'PUBLISHED') {
-        await prisma.product.update({ where: { id: p.id }, data: { status: 'PAUSED' } });
-        void alertOps('STOCK_PAUSE', { productId: p.id, title: p.title.slice(0, 80) });
-      }
-      results.push({ productId: p.id, stock, ...decision });
-    }
-    await writeAudit('INVENTORY_SYNC_ALL', 'System', 'inventory', { count: results.length });
-    return { mode: process.env.ECOM_MODE || 'MOCK', count: results.length, results };
+    return runInventorySyncAll();
   }
   /** Lista enmascarada de integraciones configurables en runtime */
   @Get('secrets')
@@ -5357,6 +5491,11 @@ async function bootstrap() {
   void alertOps('BOOT', { service: 'ecom-api', block: 75 });
   } catch (e: any) {
     console.warn('[queue] scheduler not started:', e?.message);
+  }
+  try {
+    startOpsSchedulers();
+  } catch (e: any) {
+    console.warn('[ops] schedulers not started:', e?.message);
   }
   const app = await NestFactory.create(AppModule, { rawBody: true });
   app.enableCors({ origin: process.env.APP_URL ?? 'http://localhost:3000' });
