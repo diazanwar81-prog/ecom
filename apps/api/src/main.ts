@@ -27,7 +27,13 @@ import {
 } from '../../../packages/shopify/src/index';
 import { uploadLocalFileToShopify } from '../../../packages/shopify/src/files';
 import { attachMediaToProduct } from '../../../packages/shopify/src/product-media';
-import { getCjStatus, fulfillOrder, searchCjProducts, getCjVariants } from '../../../packages/cj/src/index';
+import {
+  getCjStatus,
+  fulfillOrder,
+  searchCjProducts,
+  getCjVariants,
+  isProductListed,
+} from '../../../packages/cj/src/index';
 import {
   runProductPipeline,
   getOrchestratorMeta,
@@ -1457,11 +1463,29 @@ async function runInventorySyncAll() {
     const primary = p.suppliers.find((s) => s.isPrimary) || p.suppliers[0];
     const stock = primary?.stock ?? null;
     const decision = stockPauseDecision(stock);
-    if (decision.shouldPause && p.status === 'PUBLISHED') {
-      await prisma.product.update({ where: { id: p.id }, data: { status: 'PAUSED' } });
-      void alertOps('STOCK_PAUSE', { productId: p.id, title: p.title.slice(0, 80) });
+
+    // CJ doesn't expose live stock counts for standard dropshipping catalog
+    // items (only for pre-purchased private warehouse inventory, which this
+    // store doesn't use). Real, verifiable proxy instead: has CJ delisted
+    // this SKU from its catalog search entirely?
+    let cjListed: boolean | null = null;
+    let cjListedError: string | undefined;
+    if (primary?.cjSku) {
+      const check = await isProductListed(primary.cjSku);
+      if (check.ok) cjListed = check.listed;
+      else cjListedError = check.error;
     }
-    results.push({ productId: p.id, stock, ...decision });
+
+    const shouldPause = decision.shouldPause || cjListed === false;
+    if (shouldPause && p.status === 'PUBLISHED') {
+      await prisma.product.update({ where: { id: p.id }, data: { status: 'PAUSED' } });
+      void alertOps('STOCK_PAUSE', {
+        productId: p.id,
+        title: p.title.slice(0, 80),
+        reason: cjListed === false ? 'CJ_DELISTED' : decision.reason,
+      });
+    }
+    results.push({ productId: p.id, stock, cjListed, cjListedError, ...decision, shouldPause });
   }
   await writeAudit('INVENTORY_SYNC_ALL', 'System', 'inventory', { count: results.length });
   return { mode: process.env.ECOM_MODE || 'MOCK', count: results.length, results };

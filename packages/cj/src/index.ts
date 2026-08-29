@@ -396,4 +396,25 @@ export async function fulfillOrder(input: FulfillInput): Promise<FulfillResult> 
   }
 }
 
+/**
+ * CJ doesn't expose a real-time "stock quantity" for standard dropshipping
+ * catalog products (only for pre-purchased "private inventory" held in a CJ
+ * warehouse — see /product/stock/privateInventory/*, not applicable here).
+ * As a real, verifiable proxy signal: check whether the SKU still shows up
+ * in CJ's product search — if it was delisted/discontinued, search stops
+ * returning it, and that's a legitimate reason to pause the product.
+ */
+export async function isProductListed(
+  sku: string,
+): Promise<{ ok: boolean; listed: boolean; error?: string }> {
+  if (!sku) return { ok: false, listed: false, error: 'sku required' };
+  const result = await searchCjProducts({ keyword: sku, pageSize: 10 });
+  if (!result.ok) return { ok: false, listed: false, error: result.error };
+  // cjSku may be a variant-level SKU (e.g. CJYD310617801AZ) while search
+  // returns product-level SKUs — an exact match would false-negative on
+  // legitimate live products. Any result at all for this specific SKU
+  // keyword is treated as "still listed"; zero results is the pause signal.
+  return { ok: true, listed: result.items.length > 0 };
+}
+
 export { getCjVariantByVid, resolveCjProductImages } from './images';
