@@ -540,3 +540,80 @@ export async function setInventoryLevel(input: InventorySetInput): Promise<Inven
     return { ok: false, mock: false, error: e?.message || 'inventory network error' };
   }
 }
+
+export interface WebhookRegisterResult {
+  ok: boolean;
+  mock: boolean;
+  webhookId?: string;
+  address?: string;
+  alreadyExists?: boolean;
+  error?: string;
+  raw?: unknown;
+}
+
+/** Lists webhook subscriptions currently registered on the Shopify store (Admin REST API). */
+export async function listWebhooks(): Promise<{ ok: boolean; items: any[]; error?: string }> {
+  const status = getShopifyStatus();
+  if (!status.canPublishLive) return { ok: true, items: [] };
+  const tokenRes = await ensureShopifyAccessToken();
+  const token = tokenRes.token || '';
+  const host = shopHost();
+  try {
+    const res = await fetch(`https://${host}/admin/api/${API_VERSION}/webhooks.json`, {
+      headers: { 'X-Shopify-Access-Token': token },
+    });
+    const data = (await res.json()) as any;
+    if (!res.ok) {
+      return { ok: false, items: [], error: data?.errors ? JSON.stringify(data.errors) : `webhooks HTTP ${res.status}` };
+    }
+    return { ok: true, items: data?.webhooks || [] };
+  } catch (e: any) {
+    return { ok: false, items: [], error: e?.message || 'webhooks network error' };
+  }
+}
+
+/**
+ * Registers the orders/paid webhook against a public callback URL via Shopify's
+ * documented Admin REST API (POST /admin/api/{version}/webhooks.json).
+ * Idempotent: skips creation if a webhook already points to the same address.
+ */
+export async function registerOrderWebhook(callbackUrl: string): Promise<WebhookRegisterResult> {
+  const status = getShopifyStatus();
+  const address = `${callbackUrl.replace(/\/+$/, '')}/webhooks/orders`;
+  if (!status.canPublishLive) {
+    return { ok: true, mock: true, address };
+  }
+  const existing = await listWebhooks();
+  if (existing.ok) {
+    const match = existing.items.find((w) => w.address === address && w.topic === 'orders/paid');
+    if (match) {
+      return { ok: true, mock: false, webhookId: String(match.id), address, alreadyExists: true };
+    }
+  }
+  const tokenRes = await ensureShopifyAccessToken();
+  const token = tokenRes.token || '';
+  const host = shopHost();
+  try {
+    const res = await fetch(`https://${host}/admin/api/${API_VERSION}/webhooks.json`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Shopify-Access-Token': token,
+      },
+      body: JSON.stringify({ webhook: { topic: 'orders/paid', address, format: 'json' } }),
+    });
+    const data = (await res.json()) as any;
+    if (!res.ok) {
+      return {
+        ok: false,
+        mock: false,
+        address,
+        error: data?.errors ? JSON.stringify(data.errors) : `webhook create HTTP ${res.status}`,
+        raw: data,
+      };
+    }
+    return { ok: true, mock: false, webhookId: String(data?.webhook?.id ?? ''), address, raw: data };
+  } catch (e: any) {
+    return { ok: false, mock: false, address, error: e?.message || 'webhook create network error' };
+  }
+}

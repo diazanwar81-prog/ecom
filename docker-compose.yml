@@ -59,7 +59,6 @@ services:
     environment:
       DATABASE_URL: postgresql://ecom:ecom_local_only@postgres:5432/ecom?schema=public
       REDIS_URL: redis://redis:6379
-      APP_URL: http://localhost:3000
       API_PORT: 4000
     volumes:
       - .:/workspace
@@ -99,6 +98,23 @@ services:
       workspace:
         condition: service_started
     command: sh -c "pnpm --filter @ecom/web dev"
+    profiles: ["app"]
+
+  # Fase B: URL pública estable (dominio estático gratis de ngrok) para que
+  # Shopify pueda entregar el webhook de pedidos. Requiere NGROK_AUTHTOKEN y
+  # NGROK_STATIC_DOMAIN en .env (cuenta gratuita en ngrok.com).
+  ngrok:
+    image: ngrok/ngrok:latest
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      NGROK_AUTHTOKEN: ${NGROK_AUTHTOKEN:-}
+    command: ["http", "api:4000", "--domain=${NGROK_STATIC_DOMAIN:-}"]
+    ports:
+      - "4040:4040"
+    depends_on:
+      api:
+        condition: service_started
     profiles: ["app"]
 
 volumes:
