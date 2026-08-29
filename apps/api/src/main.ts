@@ -1,5 +1,6 @@
 import 'reflect-metadata';
-import { Controller, Get, Module, Injectable, Post, Body, Param, Query, Headers } from '@nestjs/common';
+import { Controller, Get, Module, Injectable, Post, Body, Param, Query, Headers, Req } from '@nestjs/common';
+import type { RawBodyRequest } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import {
   calculateMargin,
@@ -1035,15 +1036,28 @@ class ShopifyController {
 
   @Post('webhooks/orders')
   async ordersWebhook(
+    @Req() req: RawBodyRequest<any>,
     @Body() body: any,
     @Headers('x-shopify-hmac-sha256') hmac?: string,
     @Headers('x-shopify-topic') topic?: string,
   ) {
     const secret = (process.env.SHOPIFY_WEBHOOK_SECRET || '').trim();
-    if (secret && !hmac) return { error: 'missing_hmac' };
-    if (secret && hmac) {
-      await writeAudit('SHOPIFY_WEBHOOK_HMAC_PRESENT', 'Shopify', topic || 'orders', {
-        hmacPrefix: hmac.slice(0, 8),
+    if (secret) {
+      const rawBody = req.rawBody;
+      const valid = !!rawBody && verifyShopifyHmac(rawBody, hmac, secret);
+      if (!valid) {
+        await writeAudit('SHOPIFY_WEBHOOK_HMAC_INVALID', 'Shopify', topic || 'orders', {
+          hmacPresent: !!hmac,
+          hasRawBody: !!rawBody,
+        });
+        return { error: 'invalid_hmac' };
+      }
+      await writeAudit('SHOPIFY_WEBHOOK_HMAC_VERIFIED', 'Shopify', topic || 'orders', {
+        hmacPrefix: hmac!.slice(0, 8),
+      });
+    } else {
+      await writeAudit('SHOPIFY_WEBHOOK_UNVERIFIED', 'Shopify', topic || 'orders', {
+        reason: 'no_secret_configured',
       });
     }
 
@@ -5344,7 +5358,7 @@ async function bootstrap() {
   } catch (e: any) {
     console.warn('[queue] scheduler not started:', e?.message);
   }
-  const app = await NestFactory.create(AppModule);
+  const app = await NestFactory.create(AppModule, { rawBody: true });
   app.enableCors({ origin: process.env.APP_URL ?? 'http://localhost:3000' });
   await app.listen(Number(process.env.API_PORT ?? 4000));
   console.log(`ECOM API block-92 (phase-C landings+mp4) on ${process.env.API_PORT ?? 4000} mode=${MODE}`);

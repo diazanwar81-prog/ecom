@@ -57,6 +57,22 @@ export interface CjVariantHit {
   variantImage?: string;
 }
 
+let lastCjCallAt = 0;
+const CJ_MIN_INTERVAL_MS = 1100;
+
+/** CJ API allows ~1 request/second — serialize + pace every outbound call. */
+let cjThrottleChain: Promise<void> = Promise.resolve();
+async function cjThrottledFetch(url: string, init?: RequestInit): Promise<Response> {
+  const runNow = cjThrottleChain.then(async () => {
+    const wait = CJ_MIN_INTERVAL_MS - (Date.now() - lastCjCallAt);
+    if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+    lastCjCallAt = Date.now();
+  });
+  cjThrottleChain = runNow.catch(() => {});
+  await runNow;
+  return fetch(url, init);
+}
+
 function env(name: string, fallback = '') {
   return (process.env[name] ?? fallback).replace(/\r/g, '').trim();
 }
@@ -109,7 +125,7 @@ export async function getCjAccessToken(): Promise<{
   }
 
   try {
-    const res = await fetch(
+    const res = await cjThrottledFetch(
       'https://developers.cjdropshipping.com/api2.0/v1/authentication/getAccessToken',
       {
         method: 'POST',
@@ -155,7 +171,7 @@ export async function searchCjProducts(opts: {
   if (opts.keyword) params.set('productNameEn', opts.keyword);
 
   try {
-    const res = await fetch(
+    const res = await cjThrottledFetch(
       `https://developers.cjdropshipping.com/api2.0/v1/product/list?${params}`,
       {
         method: 'GET',
@@ -199,7 +215,7 @@ export async function getCjVariants(
   }
 
   try {
-    const res = await fetch(
+    const res = await cjThrottledFetch(
       `https://developers.cjdropshipping.com/api2.0/v1/product/variant/query?pid=${encodeURIComponent(pid)}`,
       {
         method: 'GET',
@@ -330,7 +346,7 @@ export async function fulfillOrder(input: FulfillInput): Promise<FulfillResult> 
       products: [productLine],
     };
 
-    const res = await fetch(
+    const res = await cjThrottledFetch(
       'https://developers.cjdropshipping.com/api2.0/v1/shopping/order/createOrder',
       {
         method: 'POST',
