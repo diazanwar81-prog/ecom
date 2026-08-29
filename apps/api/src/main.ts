@@ -172,6 +172,8 @@ import {
 } from '../../../packages/phase-a/src/index';
 import {
   ensureShopifyAccessToken,
+  registerOrderWebhook,
+  listWebhooks,
 } from '../../../packages/shopify/src/index';
 import {
   PHASE_B_META,
@@ -995,6 +997,26 @@ class ShopifyController {
   @Get('status')
   status() {
     return getShopifyStatus();
+  }
+
+  @Get('webhooks/list')
+  async listWebhooksEndpoint() {
+    return listWebhooks();
+  }
+
+  /** Registers orders/paid webhook against APP_URL/API_URL (or an explicit body.callbackUrl). */
+  @Post('webhooks/register')
+  async registerWebhookEndpoint(@Body() body: { callbackUrl?: string }) {
+    const callbackUrl = (body?.callbackUrl || process.env.API_URL || process.env.APP_URL || '').trim();
+    if (!callbackUrl || !/^https:\/\//i.test(callbackUrl)) {
+      return {
+        error: 'invalid_callback_url',
+        message: 'Se requiere una URL pública https:// (API_URL en .env, o pásala en el body).',
+      };
+    }
+    const result = await registerOrderWebhook(callbackUrl);
+    await writeAudit('SHOPIFY_WEBHOOK_REGISTERED', 'Shopify', result.address || callbackUrl, result);
+    return result;
   }
 
   @Post('simulate-order')
