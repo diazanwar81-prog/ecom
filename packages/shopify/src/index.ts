@@ -577,9 +577,31 @@ export async function listWebhooks(): Promise<{ ok: boolean; items: any[]; error
  * documented Admin REST API (POST /admin/api/{version}/webhooks.json).
  * Idempotent: skips creation if a webhook already points to the same address.
  */
+/** Deletes a webhook subscription by its Shopify id (Admin REST API). */
+export async function deleteWebhook(webhookId: string): Promise<{ ok: boolean; error?: string }> {
+  const status = getShopifyStatus();
+  if (!status.canPublishLive) return { ok: true };
+  const tokenRes = await ensureShopifyAccessToken();
+  const token = tokenRes.token || '';
+  const host = shopHost();
+  try {
+    const res = await fetch(`https://${host}/admin/api/${API_VERSION}/webhooks/${webhookId}.json`, {
+      method: 'DELETE',
+      headers: { 'X-Shopify-Access-Token': token },
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => null);
+      return { ok: false, error: data?.errors ? JSON.stringify(data.errors) : `delete HTTP ${res.status}` };
+    }
+    return { ok: true };
+  } catch (e: any) {
+    return { ok: false, error: e?.message || 'webhook delete network error' };
+  }
+}
+
 export async function registerOrderWebhook(callbackUrl: string): Promise<WebhookRegisterResult> {
   const status = getShopifyStatus();
-  const address = `${callbackUrl.replace(/\/+$/, '')}/webhooks/orders`;
+  const address = `${callbackUrl.replace(/\/+$/, '')}/shopify/webhooks/orders`;
   if (!status.canPublishLive) {
     return { ok: true, mock: true, address };
   }
