@@ -396,6 +396,104 @@ export async function fulfillOrder(input: FulfillInput): Promise<FulfillResult> 
   }
 }
 
+export interface CjOrderTracking {
+  ok: boolean;
+  cjOrderId: string;
+  orderStatus?: string;
+  trackNumber?: string;
+  logisticName?: string;
+  trackingProvider?: string;
+  error?: string;
+  raw?: unknown;
+}
+
+/**
+ * Real order status + tracking lookup (CJ docs "1.7 Orden de consulta (GET)").
+ * orderId here is CJ's own order id (the supplierOrderId we stored after
+ * createOrder), not the Shopify order id.
+ */
+export async function getCjOrderDetail(cjOrderId: string): Promise<CjOrderTracking> {
+  if (!cjOrderId) return { ok: false, cjOrderId, error: 'cjOrderId required' };
+  const auth = await getCjAccessToken();
+  if (!auth.ok || !auth.accessToken) {
+    return { ok: false, cjOrderId, error: auth.error || 'no token' };
+  }
+
+  try {
+    const res = await cjThrottledFetch(
+      `https://developers.cjdropshipping.com/api2.0/v1/shopping/order/getOrderDetail?orderId=${encodeURIComponent(cjOrderId)}`,
+      {
+        method: 'GET',
+        headers: { 'CJ-Access-Token': auth.accessToken },
+      },
+    );
+    const data = (await res.json()) as any;
+    if (!res.ok || data?.result === false) {
+      return { ok: false, cjOrderId, error: data?.message || `getOrderDetail HTTP ${res.status}`, raw: data };
+    }
+    const d = data?.data || {};
+    return {
+      ok: true,
+      cjOrderId,
+      orderStatus: d.orderStatus || d.status,
+      trackNumber: d.trackNumber || d.trackingNumber || undefined,
+      logisticName: d.logisticName || d.logisticsName,
+      trackingProvider: d.trackingProvider || d.trackingUrl,
+      raw: data,
+    };
+  } catch (e: any) {
+    return { ok: false, cjOrderId, error: e?.message || 'network error' };
+  }
+}
+
+/**
+ * Batch version (CJ docs "1.16 Consultar pedidos en lote (POST)"), up to 100
+ * ids, rate-limited by CJ to 2 req/s/account (our throttle already serializes
+ * to ~1 req/1.1s globally, which is under that limit).
+ */
+export async function getCjOrderDetailBatch(cjOrderIds: string[]): Promise<{
+  ok: boolean;
+  items: CjOrderTracking[];
+  error?: string;
+}> {
+  const ids = cjOrderIds.filter(Boolean).slice(0, 100);
+  if (!ids.length) return { ok: false, items: [], error: 'no order ids' };
+  const auth = await getCjAccessToken();
+  if (!auth.ok || !auth.accessToken) {
+    return { ok: false, items: [], error: auth.error || 'no token' };
+  }
+
+  try {
+    const res = await cjThrottledFetch(
+      'https://developers.cjdropshipping.com/api2.0/v1/shopping/order/getOrderDetailBatch',
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'CJ-Access-Token': auth.accessToken,
+        },
+        body: JSON.stringify({ orderIds: ids }),
+      },
+    );
+    const data = (await res.json()) as any;
+    if (!res.ok || data?.result === false) {
+      return { ok: false, items: [], error: data?.message || `getOrderDetailBatch HTTP ${res.status}` };
+    }
+    const list = Array.isArray(data?.data) ? data.data : data?.data?.list || [];
+    const items: CjOrderTracking[] = list.map((d: any) => ({
+      ok: true,
+      cjOrderId: String(d.orderId || d.orderNum || ''),
+      orderStatus: d.orderStatus || d.status,
+      trackNumber: d.trackNumber || d.trackingNumber || undefined,
+      logisticName: d.logisticName || d.logisticsName,
+      trackingProvider: d.trackingProvider || d.trackingUrl,
+    }));
+    return { ok: true, items };
+  } catch (e: any) {
+    return { ok: false, items: [], error: e?.message || 'network error' };
+  }
+}
+
 /**
  * CJ doesn't expose a real-time "stock quantity" for standard dropshipping
  * catalog products (only for pre-purchased "private inventory" held in a CJ

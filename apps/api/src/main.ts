@@ -22,6 +22,7 @@ import {
   publishProduct,
   createMockOrder,
   createOrderFulfillment,
+  updateFulfillmentTracking,
   setInventoryLevel,
   getPrimaryLocationId,
 } from '../../../packages/shopify/src/index';
@@ -33,6 +34,7 @@ import {
   searchCjProducts,
   getCjVariants,
   isProductListed,
+  getCjOrderDetail,
 } from '../../../packages/cj/src/index';
 import {
   runProductPipeline,
@@ -95,6 +97,7 @@ import {
   applyInventoryPolicy,
   verifyInventoryLoop,
   extractTrackingFromNote,
+  extractFulfillmentIdFromNote,
   verifyTracking,
   summarizeVerification,
   testWebhookHmac,
@@ -1355,6 +1358,12 @@ class OrdersController {
           trackingCompany: result.carrier || 'CJPacket Ordinary',
           notifyCustomer: false,
         });
+        if (tr.ok && tr.fulfillmentId) {
+          await prisma.order.update({
+            where: { id },
+            data: { fulfillmentNote: `${updated.fulfillmentNote} · ff=${tr.fulfillmentId}` },
+          });
+        }
         await writeAudit('AUTO_TRACKING_SYNC', 'Order', id, tr);
       }
     } catch (e: any) {
@@ -1437,7 +1446,86 @@ class OrdersController {
     };
   }
 
+  /** Session 2: real CJ order tracking poll — getOrderDetail per fulfilled order. */
+  @Post('tracking/poll-cj')
+  async pollCjTracking(@Body() body: { dryRun?: boolean; limit?: number }) {
+    const dryRun = body?.dryRun !== false;
+    const orders = await prisma.order.findMany({
+      where: { status: 'FULFILLED' },
+      take: Math.min(Number(body?.limit) || 50, 100),
+      orderBy: { updatedAt: 'desc' },
+    });
 
+    const results: Array<Record<string, unknown>> = [];
+    for (const o of orders) {
+      const note = (o as any).fulfillmentNote as string | null;
+      const tr = extractTrackingFromNote(note);
+      if (!tr.supplierOrderId || tr.supplierOrderId.startsWith('mock-cj-')) {
+        continue; // no real CJ order id to poll, or it was a MOCK fulfillment
+      }
+      const hasRealTracking =
+        tr.trackingHint && tr.trackingHint !== 'n/a' && !/^PENDING-/i.test(tr.trackingHint) && !/^MOCKTRACK/i.test(tr.trackingHint);
+      if (hasRealTracking) continue; // already has a real tracking number, nothing to poll
+
+      const detail = await getCjOrderDetail(tr.supplierOrderId);
+      if (!detail.ok) {
+        results.push({ orderId: o.id, supplierOrderId: tr.supplierOrderId, error: detail.error });
+        continue;
+      }
+      if (!detail.trackNumber) {
+        results.push({
+          orderId: o.id,
+          supplierOrderId: tr.supplierOrderId,
+          orderStatus: detail.orderStatus,
+          note: 'CJ aún no emite tracking',
+        });
+        continue;
+      }
+
+      results.push({
+        orderId: o.id,
+        supplierOrderId: tr.supplierOrderId,
+        trackNumber: detail.trackNumber,
+        logisticName: detail.logisticName,
+        orderStatus: detail.orderStatus,
+      });
+
+      if (dryRun) continue;
+
+      const newNote = `${note || ''} · CJ tracking real: ${detail.trackNumber} (${detail.logisticName || ''})`;
+      await prisma.order.update({ where: { id: o.id }, data: { fulfillmentNote: newNote } });
+
+      const shopifyOrderId = String(o.externalId || '');
+      if (!/^\d+$/.test(shopifyOrderId)) continue;
+
+      const existingFulfillmentId = extractFulfillmentIdFromNote(note);
+      let shopifyResult;
+      if (existingFulfillmentId) {
+        shopifyResult = await updateFulfillmentTracking({
+          fulfillmentId: existingFulfillmentId,
+          trackingNumber: detail.trackNumber,
+          trackingCompany: detail.logisticName || 'CJPacket Ordinary',
+          notifyCustomer: true,
+        });
+      } else {
+        shopifyResult = await createOrderFulfillment({
+          orderId: shopifyOrderId,
+          trackingNumber: detail.trackNumber,
+          trackingCompany: detail.logisticName || 'CJPacket Ordinary',
+          notifyCustomer: true,
+        });
+        if (shopifyResult.ok && shopifyResult.fulfillmentId) {
+          await prisma.order.update({
+            where: { id: o.id },
+            data: { fulfillmentNote: `${newNote} · ff=${shopifyResult.fulfillmentId}` },
+          });
+        }
+      }
+      await writeAudit('CJ_TRACKING_POLL_SYNCED', 'Order', o.id, { detail, shopifyResult });
+    }
+
+    return { mode: MODE, block: 61, dryRun, checked: orders.length, results };
+  }
 }
 
 @Controller('ai')

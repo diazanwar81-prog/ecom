@@ -430,6 +430,71 @@ export async function createOrderFulfillment(input: FulfillmentInput): Promise<F
   }
 }
 
+/**
+ * Add/replace tracking on an order that Shopify already considers fulfilled
+ * (real endpoint: POST .../fulfillments/{id}/update_tracking.json). Needed
+ * because a fulfillment can only be created once per fulfillment_order —
+ * createOrderFulfillment can't be re-called once CJ later issues the real
+ * tracking number for an order that was already marked FULFILLED.
+ */
+export async function updateFulfillmentTracking(input: {
+  fulfillmentId: string;
+  trackingNumber: string;
+  trackingCompany?: string;
+  trackingUrl?: string;
+  notifyCustomer?: boolean;
+}): Promise<FulfillmentResult> {
+  const status = getShopifyStatus();
+  if (!input.fulfillmentId || !input.trackingNumber) {
+    return { ok: false, mock: false, error: 'fulfillmentId and trackingNumber required' };
+  }
+
+  if (!status.canPublishLive) {
+    return { ok: true, mock: true, fulfillmentId: input.fulfillmentId, raw: { simulated: true, ...input } };
+  }
+
+  const tokenRes = await ensureShopifyAccessToken();
+  const token = tokenRes.token || '';
+  const host = shopHost();
+  const fulfillmentId = String(input.fulfillmentId).replace(/\D/g, '') || input.fulfillmentId;
+
+  try {
+    const body = {
+      fulfillment: {
+        notify_customer: input.notifyCustomer !== false,
+        tracking_info: {
+          number: input.trackingNumber,
+          company: input.trackingCompany || undefined,
+          url: input.trackingUrl || undefined,
+        },
+      },
+    };
+    const res = await fetch(
+      `https://${host}/admin/api/${API_VERSION}/fulfillments/${fulfillmentId}/update_tracking.json`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Shopify-Access-Token': token,
+        },
+        body: JSON.stringify(body),
+      },
+    );
+    const data = (await res.json()) as any;
+    if (!res.ok) {
+      return {
+        ok: false,
+        mock: false,
+        error: data?.errors ? JSON.stringify(data.errors) : `Shopify update_tracking HTTP ${res.status}`,
+        raw: data,
+      };
+    }
+    return { ok: true, mock: false, fulfillmentId: String(data?.fulfillment?.id || fulfillmentId), raw: data };
+  } catch (e: any) {
+    return { ok: false, mock: false, error: e?.message || 'Error de red Shopify update_tracking' };
+  }
+}
+
 export function createMockOrder(productTitle: string, price: number, currency = 'COP'): MockOrder {
   return {
     id: `mock-order-${Date.now()}`,

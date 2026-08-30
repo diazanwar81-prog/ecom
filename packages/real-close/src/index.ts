@@ -197,6 +197,13 @@ export function extractTrackingFromNote(note?: string | null): {
   return { supplierOrderId, trackingHint };
 }
 
+/** Pulls a Shopify fulfillment id back out of a note like "... · ff=123456 · ...". */
+export function extractFulfillmentIdFromNote(note?: string | null): string | null {
+  if (!note) return null;
+  const m = String(note).match(/ff=(\d+)/i);
+  return m?.[1] || null;
+}
+
 export function verifyTracking(input: {
   fulfilledOrders: number;
   withSupplierId: number;
