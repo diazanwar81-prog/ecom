@@ -1758,7 +1758,10 @@ class ProductsController {
       }
     }
 
-    const imageUrlsPub = await resolveCjImageUrls(enriched.title, enriched.cjSku);
+    const imageUrlsPub =
+      Array.isArray(enriched.imageUrls) && enriched.imageUrls.length
+        ? enriched.imageUrls
+        : await resolveCjImageUrls(enriched.title, enriched.cjSku, enriched.cjVariantId);
     const result = await publishProduct({
       title: enriched.title,
       description: enriched.description,
@@ -2039,6 +2042,29 @@ class ProductsController {
       inventorySync,
       note: 'Go-live con copy IA (bloque 16). Título limpio + descripción es-CO. CJ conservado.',
     };
+  }
+
+  /** Attaches Product.imageUrls to an already-published Shopify product (no duplicate create). */
+  @Post(':id/attach-images')
+  async attachImages(@Param('id') id: string) {
+    const p = await prisma.product.findUnique({ where: { id } });
+    if (!p) return { error: 'not_found' };
+    if (!p.externalId) return { error: 'not_published', message: 'Publica el producto primero' };
+    const urls = Array.isArray(p.imageUrls) ? (p.imageUrls as unknown as string[]) : [];
+    if (!urls.length) return { error: 'no_image_urls', message: 'Product.imageUrls está vacío' };
+
+    const results: any[] = [];
+    for (const url of urls) {
+      const r = await attachMediaToProduct({
+        productId: p.externalId,
+        originalSource: url,
+        mediaContentType: 'IMAGE',
+        alt: p.title.slice(0, 120),
+      });
+      results.push({ url, ok: r.ok, error: r.error });
+    }
+    await writeAudit('PRODUCT_IMAGES_ATTACHED', 'Product', id, { count: results.length });
+    return { mode: MODE, productId: id, externalId: p.externalId, results };
   }
 
   @Post(':id/sync-media')
