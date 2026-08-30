@@ -180,6 +180,7 @@ import {
   ensureShopifyAccessToken,
   registerOrderWebhook,
   listWebhooks,
+  deleteWebhook,
 } from '../../../packages/shopify/src/index';
 import {
   PHASE_B_META,
@@ -1061,6 +1062,14 @@ class ShopifyController {
   @Get('webhooks/list')
   async listWebhooksEndpoint() {
     return listWebhooks();
+  }
+
+  @Post('webhooks/delete')
+  async deleteWebhookEndpoint(@Body() body: { webhookId?: string }) {
+    if (!body?.webhookId) return { error: 'webhookId_required' };
+    const result = await deleteWebhook(body.webhookId);
+    await writeAudit('SHOPIFY_WEBHOOK_DELETED', 'Shopify', body.webhookId, result);
+    return result;
   }
 
   /** Registers orders/paid webhook against APP_URL/API_URL (or an explicit body.callbackUrl). */
