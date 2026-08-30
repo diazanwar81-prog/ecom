@@ -701,7 +701,10 @@ class DiscoveryController {
       salePrice: body.salePrice,
       productCost: body.productCost,
       shippingCost: body.shippingCost ?? 0,
-      stock: body.stock ?? 0,
+      // null (stock unknown) — not 0 (which stockPauseDecision reads as "out
+      // of stock" and blocks). CJ doesn't expose a live count for standard
+      // dropshipping catalog items (see isProductListed / Fase C-2 notes).
+      stock: (body.stock ?? null) as unknown as number,
       currency: body.currency || 'COP',
       countryCode: body.countryCode || 'CO',
       supplierName: body.supplierName || 'CJ Dropshipping',
