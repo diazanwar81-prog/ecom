@@ -684,6 +684,38 @@ class DiscoveryController {
     return getDiscoveryStatus();
   }
 
+  /** Ingest one hand-picked candidate (e.g. a real product found via /cj/search) instead of auto-discovery. */
+  @Post('ingest-one')
+  async ingestOne(@Body() body: Partial<DiscoveredCandidate> & { runPipeline?: boolean }) {
+    const store = await prisma.store.findFirst();
+    if (!store) return { error: 'no_store' };
+    if (!body.title || !body.salePrice || !body.productCost) {
+      return { error: 'missing_fields', message: 'title, salePrice y productCost son requeridos' };
+    }
+    const candidate: DiscoveredCandidate = {
+      title: body.title,
+      source: body.source || 'manual',
+      sourceMode: (body.sourceMode as any) || MODE_ENUM,
+      opportunityScore: body.opportunityScore ?? 60,
+      confidence: body.confidence ?? 80,
+      salePrice: body.salePrice,
+      productCost: body.productCost,
+      shippingCost: body.shippingCost ?? 0,
+      stock: body.stock ?? 0,
+      currency: body.currency || 'COP',
+      countryCode: body.countryCode || 'CO',
+      supplierName: body.supplierName || 'CJ Dropshipping',
+      supplierVerified: body.supplierVerified !== false,
+      cjVariantId: body.cjVariantId,
+      cjSku: body.cjSku,
+      signals: body.signals || ['manual'],
+      externalHint: body.externalHint,
+    };
+    const r = await ingestCandidate(store.id, candidate, Boolean(body.runPipeline));
+    await writeAudit('DISCOVERY_INGEST_ONE', 'Product', r.productId, { skipped: r.skipped, reason: r.reason });
+    return { mode: MODE, ...r };
+  }
+
   /** List candidates without writing to DB */
   @Get('preview')
   async preview(@Query('limit') limit = '5', @Query('includeWeak') includeWeak?: string) {
