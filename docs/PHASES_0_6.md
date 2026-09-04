@@ -1,54 +1,49 @@
 # ECOM — Fases 0→6 (estado operativo)
 
-**Actualizado:** 2026-08-25  
-**Bloque código media/gate:** 101 (Phase 1 critical path)
+**Actualizado:** 2026-09-04  
+**Verificador:** `@ecom/phase-runner` + ver `docs/PHASES_0_2_STATUS.md`
 
-## Fase 0 — Infra (casi lista)
+## Fase 0 — Estabilización — **VERIFY PASS**
 - [x] Docker API/Web/Postgres/Redis
-- [x] Shopify publish live + inventario
-- [x] CJ fulfill path
-- [x] Panel, reglas, colas, discovery
-- [ ] Webhook HTTPS estable (túnel nombrado / VPS)
+- [x] Shopify publish + CJ fulfill path
+- [x] Publish gate media/copy/margen (`catalog-quality`)
+- [x] Kill-switch + smoke (`hardening`)
+- [ ] Webhook HTTPS estable en prod (túnel/VPS) — runtime
 
-## Fase 1 — Catálogo vendible ← **EN CURSO**
-- [x] `resolveCjProductImages` (vid → variantImage + sku/title fallback) en `@ecom/cj`
-- [x] `evaluatePublishGate` (media, copy, margen, CJ) en `@ecom/catalog-quality`
-- [x] `parseProductCopy` + prompt estricto en `@ecom/ai-router`
-- [ ] Aplicar `scripts/apply-phase1-media-gate.py` en `main.ts` (go-live bloquea sin fotos)
-- [ ] Verificar sync-media count > 0 con vid real
-- [ ] Publish Shopify con `images[]` pobladas
+## Fase 1 — Ops 24/7 — **LOGIC PASS / RUNTIME PARCIAL**
+- [x] HMAC Shopify (`ops.verifyShopifyHmac`)
+- [x] Pause stock=0 (`stockPauseDecision`)
+- [x] Digest diario payload
+- [x] Checklist + `realModeGate` (REAL no auto)
+- [ ] Job inventario 15–20 min en workers
+- [ ] Job tracking poll 30 min
+- [ ] Auth sesión real si panel sigue MOCK
 
-**Comando local:**
+## Fase 2 — Scoring — **VERIFY PASS**
+- [x] Opportunity Score ponderado (`@ecom/scoring`)
+- [x] Saturation Score
+- [x] Hard filters + banned categories
+- [x] Tests vitest
+- [ ] Todas las rutas discovery → `evaluateCandidate`
+
+## Fase 3 — Contenido + Canva
+- [ ] Landing HTML por producto
+- [ ] Conector Canva (off por defecto)
+- [ ] Policy 5 imágenes + video ASSET_PENDING
+
+## Fase 4 — Panel + Autonomía
+- [ ] KPIs + módulos completos
+- [ ] Autopilot con constraints
+
+## Fase 5 — Infra prod
+- [ ] compose.prod + VPS + backups + CI
+
+## Fase 6 — Seguridad & cierre
+- [ ] MFA, OpenAPI, E2E, docs instalación
+
+## Verify local
 ```bash
 git pull
-python3 scripts/apply-phase1-media-gate.py
-git add -A && git commit -m "feat: phase1 media vid + publish gate + copy parse" && git push
-docker compose --profile app up -d --force-recreate
+docker compose run --rm workspace pnpm --filter @ecom/scoring test
+docker compose run --rm workspace pnpm --filter @ecom/phase-runner test
 ```
-
-## Fase 2 — Primera venta real
-- [ ] HMAC webhook + idempotencia
-- [ ] Fulfill con vid del producto vendido
-- [ ] Tracking visible
-- [ ] Pedido de prueba pagado
-
-## Fase 3 — 24/7
-- [ ] URL pública fija
-- [ ] Jobs inventario / tracking / digest
-- [ ] Alertas Telegram fiables
-
-## Fase 4 — Branding completo + landing
-- [ ] 4+1 fotos policy
-- [ ] Landing HTML por producto (phase-c)
-- [ ] Video opcional
-
-## Fase 5 — Crecimiento
-- [ ] Discovery útil (menos MOCK)
-- [ ] Auto-approve conservador
-- [ ] Ads solo con credenciales
-
-## Fase 6 — Cierre spec
-- [ ] Auth real, CI, docs, backups
-
-## Criterio “primera venta”
-Fase 1 cerrada (ficha con fotos) + Fase 2 (pedido→fulfill). No requiere Fase 4–6.
