@@ -1,0 +1,11 @@
+{
+  "name": "@ecom/phase-runner",
+  "private": true,
+  "version": "0.1.0",
+  "main": "src/index.ts",
+  "scripts": {
+    "test": "vitest run",
+    "verify": "tsx src/cli-verify.ts"
+  },
+  "dependencies": {}
+}
