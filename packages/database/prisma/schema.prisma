@@ -102,7 +102,11 @@ model Product {
   salePrice          Decimal?          @db.Decimal(12, 2)
   currency           String            @default("COP")
   sourceMode         RuntimeMode       @default(MOCK)
+  /// Shopify product id when published
   externalId         String?
+  /// Stable key from @ecom/ops-p2 productDedupeKey (cj:vid:… / cj:sku:… / …)
+  /// NULL allowed for legacy rows; unique per store when set
+  dedupeKey          String?
   isFirstPublication Boolean           @default(true)
   priceChangesToday  Int               @default(0)
   priceChangesDate   DateTime?
@@ -113,8 +117,11 @@ model Product {
   createdAt          DateTime          @default(now())
   updatedAt          DateTime          @updatedAt
 
+  @@unique([storeId, dedupeKey])
   @@index([storeId, status])
   @@index([sourceMode])
+  @@index([dedupeKey])
+  @@index([externalId])
 }
 
 model Supplier {
@@ -139,7 +146,7 @@ model ProductSupplier {
   shippingCost  Decimal? @db.Decimal(12, 2)
   stock         Int?
   isPrimary     Boolean  @default(false)
-  /// CJ Dropshipping variant id (vid)
+  /// CJ Dropshipping variant id (vid) — unique when set (global catalog)
   cjVariantId   String?
   /// CJ variant SKU
   cjSku         String?
@@ -147,7 +154,8 @@ model ProductSupplier {
   updatedAt     DateTime @updatedAt
 
   @@unique([productId, supplierId, countryCode])
-  @@index([cjVariantId])
+  @@unique([cjVariantId])
+  @@index([cjSku])
 }
 
 model PriceChange {
@@ -185,6 +193,7 @@ model Order {
   id              String      @id @default(cuid())
   storeId         String
   store           Store       @relation(fields: [storeId], references: [id])
+  /// Shopify order id — unique per store when set (webhook idempotency)
   externalId      String?
   orderNumber     String?
   email           String?
@@ -197,6 +206,7 @@ model Order {
   createdAt       DateTime    @default(now())
   updatedAt       DateTime    @updatedAt
 
+  @@unique([storeId, externalId])
   @@index([storeId, status])
   @@index([externalId])
 }
