@@ -1,0 +1,9 @@
+{
+  "name": "@ecom/ops-p0",
+  "private": true,
+  "version": "0.1.0",
+  "main": "src/index.ts",
+  "scripts": {
+    "test": "vitest run"
+  }
+}
