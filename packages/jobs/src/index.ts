@@ -1,48 +1,33 @@
 /**
- * ECOM Jobs — BullMQ over Redis
- * Queues: discovery, pipeline
- * Falls back to inline execution if Redis unavailable
+ * ECOM Jobs — BullMQ discovery/pipeline + stable 24/7 catalog
  */
+import { Queue, Worker, type Job } from 'bullmq';
+import IORedis from 'ioredis';
 
-import { Queue, Worker, type Job, type ConnectionOptions } from 'bullmq';
+export * from './stable-jobs';
 
 export type DiscoveryJobData = {
-  limit?: number;
-  runPipeline?: boolean;
-  onlyPassingFilters?: boolean;
-  includeWeak?: boolean;
+  triggeredBy: 'scheduler' | 'manual' | 'api';
+  correlationId?: string;
 };
 
 export type PipelineJobData = {
   productId: string;
-  skipAiCopy?: boolean;
+  stage?: string;
+  correlationId?: string;
 };
 
-function redisUrl() {
-  return (process.env.REDIS_URL || 'redis://127.0.0.1:6379').trim();
-}
-
-function connection(): ConnectionOptions {
-  const url = new URL(redisUrl());
-  return {
-    host: url.hostname,
-    port: Number(url.port || 6379),
-    maxRetriesPerRequest: null,
-  };
-}
-
+let connectionSingleton: IORedis | null = null;
 let discoveryQueue: Queue | null = null;
 let pipelineQueue: Queue | null = null;
 let workersStarted = false;
 
-export function getJobsStatus() {
-  return {
-    block: 11,
-    redisUrl: redisUrl().replace(/:\/\/.*@/, '://***@'),
-    queues: ['ecom-discovery', 'ecom-pipeline'],
-    workersStarted,
-    note: 'Jobs en Redis. Si Redis cae, la API puede ejecutar inline.',
-  };
+function connection() {
+  if (!connectionSingleton) {
+    const url = process.env.REDIS_URL || 'redis://127.0.0.1:6379';
+    connectionSingleton = new IORedis(url, { maxRetriesPerRequest: null });
+  }
+  return connectionSingleton;
 }
 
 export function getDiscoveryQueue() {
@@ -104,7 +89,6 @@ export type JobHandlers = {
   onPipeline: (data: PipelineJobData, job: Job) => Promise<unknown>;
 };
 
-/** Start workers once (call from API bootstrap) */
 export function startWorkers(handlers: JobHandlers) {
   if (workersStarted) return { ok: true, already: true };
   try {
