@@ -78,9 +78,6 @@ export function evaluateAutopilotAction(
   if (constraints.killSwitch) return { allowed: false, reason: 'kill_switch' };
 
   if (action === 'ai_call') {
-    if (!constraints.allowPaidAi && process.env.ECOM_AI_FORCE_LIVE === 'true') {
-      // still allow if force live free tier — cost gate separate
-    }
     if (usage.aiCallsToday >= constraints.maxAiCallsPerDay) {
       return { allowed: false, reason: 'ai_daily_cap' };
     }
@@ -137,11 +134,4 @@ export function evaluateAutopilotAction(
   }
 
   return { allowed: false, reason: 'unknown_action' };
-}
-
-function flag(name: string): boolean {
-  const v = String(process.env[name] || '')
-    .trim()
-    .toLowerCase();
-  return v === 'true' || v === '1' || v === 'yes';
 }
