@@ -6,7 +6,7 @@ import {
   evaluateAutopilotAction,
   type AutopilotAction,
   type UsageCounters,
-} from '@ecom/autonomy/src/constraints';
+} from '@ecom/autonomy/constraints';
 import { scoreCandidate } from '@ecom/ops-p2';
 
 export const PHASE4 = {
