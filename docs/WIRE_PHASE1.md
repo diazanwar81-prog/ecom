@@ -2,27 +2,37 @@
 
 ## Archivos
 
-- `apps/api/src/phase1-runtime-wire.ts` — lógica webhook + tracking + dedupe helpers
-- `apps/api/src/main.ts` — puntos de llamada (import + webhook + scheduler + endpoints)
+1. `apps/api/src/phase1-runtime-wire.ts` — webhook + tracking + dedupe (ya en main)
+2. `scripts/apply-phase1-main.mjs` — parchea `main.ts` con los call sites
 
-## Endpoints nuevos
+## Aplicar en tu Mac
 
-| Método | Path | Uso |
-|--------|------|-----|
-| GET | `/ops/p0/verify` | selfTestP0 |
-| POST | `/ops/tracking/poll` | polling CJ tracking |
-| POST | `/shopify/webhooks/orders` | HMAC + idempotencia phase1 |
+```bash
+cd /Users/usuario/Downloads/ecom-v2
+git pull
+node scripts/apply-phase1-main.mjs
+# debe imprimir: Wired phase-1 into apps/api/src/main.ts
+# o: Already wired
+
+docker compose --profile app up -d --build
+```
+
+## Endpoints
+
+| Método | Path |
+|--------|------|
+| GET | `/ops/p0/verify` |
+| POST | `/ops/tracking/poll` |
+| POST | `/shopify/webhooks/orders` (HMAC + idempotencia phase1) |
 
 ## Scheduler
 
-- inventory (existente)
-- **tracking** cada `ECOM_TRACKING_INTERVAL_MINUTES` (default 30)
+- inventory (ya existía)
+- tracking cada `ECOM_TRACKING_INTERVAL_MINUTES` (30)
 
-## Verificar
+## Probar
 
 ```bash
-git pull
-docker compose --profile app up -d --build
-curl -s http://localhost:4000/ops/p0/verify | head
-curl -s -X POST http://localhost:4000/ops/tracking/poll | head
+curl -s http://localhost:4000/ops/p0/verify
+curl -s -X POST http://localhost:4000/ops/tracking/poll
 ```
